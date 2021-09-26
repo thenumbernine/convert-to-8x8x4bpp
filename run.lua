@@ -57,15 +57,6 @@ function Node:init(args)
 	end
 end
 
-function Node:getChildIndex(pt)
-	local k = bit.bor(
-		pt.pos.v[0] >= self.mid.v[0] and 1 or 0,
-		pt.pos.v[1] >= self.mid.v[1] and 2 or 0,
-		pt.pos.v[2] >= self.mid.v[2] and 4 or 0)		
-	k = k + 1
-	return k
-end
-
 function Node:getChildForIndex(k)
 	local ch = self.chs[k]
 	if ch then return ch end
@@ -78,9 +69,9 @@ function Node:getChildForIndex(k)
 		pts = table(),
 	}
 	self.chs[k] = ch
-	k = k - 1	-- 1-based to 0-based for bitflag testing
+	
 	for j=0,self.dim-1 do
-		if bit.band(k, bit.lshift(1,j)) == 0 then
+		if not self:childIndexHasBit(k, j) then
 			ch.min.v[j] = self.min.v[j]
 			ch.max.v[j] = self.mid.v[j]
 		else
@@ -93,51 +84,70 @@ function Node:getChildForIndex(k)
 	return ch
 end
 
-function Node:insert(pt)
+function Node:addToTree(pt)
 	if self.chs then
-		local k = self:getChildIndex(pt)
 		assert(not self.pts)
-		self:getChildForIndex(k):insert(pt)
+		self:getChildForIndex(self:getChildIndex(pt)):addToTree(pt)
 	else
+		assert(not self.chs)
 		self.pts:insert(pt)
-		if #self.pts > 1 then	-- split
+		if #self.pts > self.splitSize then	-- split
 			-- create upon request
 			self.chs = {}
 			local pts = self.pts
 			self.pts = nil
 			for _,pt in ipairs(pts) do
-				self:insert(pt)
+				self:addToTree(pt)
 			end
 		end
 	end
 end
 
-function Node:map(f)
-	self = self or root
-	f(self)
+function Node:iterRecurse()
+	coroutine.yield(self)
 	if self.chs then
 		for _,ch in pairs(self.chs) do
-			ch:map(f)
+			ch:iterRecurse()
 		end
 	end
 end
 
 function Node:iter()
 	return coroutine.wrap(function()
-		self:map(function(node)
-			coroutine.yield(node)
-		end)
+		self:iterRecurse()
 	end)
 end
+
+function Node:countleaves()
+	local n = 0
+	for node in self:iter() do
+		if node.pts then
+			n = n + 1
+		end
+	end
+	return n
+end
+
 
 local Reduce = class()
 
 function Reduce:init(args)
-	local src = args.src
 	local dim = assert(args.dim)
-	
+	local targetSize = assert(args.targetSize)
+
 	self.nodeClass = class(Node)
 	self.nodeClass.dim = dim
+	self.nodeClass.splitSize = assert(args.splitSize)
+
+	-- returns a value that can be uniquely mapped from 0..2^dim-1
+	self.nodeClass.getChildIndex = assert(args.nodeGetChildIndex)
+	
+	--[[
+	childIndex in 0..2^dim-1
+	b in 0..dim-1
+	--]]
+	self.nodeClass.childIndexHasBit = assert(args.nodeChildIndexHasBit)
+
 	local root = self.nodeClass{
 		depth = 0,
 		min = vector('double', dim),
@@ -153,76 +163,81 @@ function Reduce:init(args)
 		root.mid.v[i] = (minv + maxv) * .5
 	end
 
-	for k,v in pairs(src.hist) do
-		root:insert{
-			key = k,
-			pos = vector('double', {
-				bit.band(0xff, k),
-				bit.band(0xff, bit.rshift(k, 8)),
-				bit.band(0xff, bit.rshift(k, 16))
-			}),
-			weight = v,
-		}
-	end
+	args.buildRoot(root)
 	
-	local function countleaves()
-		local n = 0
-		for node in root:iter() do
-			if node.pts then
-				n = n + 1
-			end
-		end
-		return n
-	end
-	local n = countleaves()
-	if n > 16 then
-		local all = table()
-		for node in root:iter() do
-			all:insert(node) 
-		end
-		all:sort(function(a,b) return a.depth > b.depth end)
-		
+	local n = root:countleaves()
+	if n > targetSize then
 		local branches = table()
 		for node in root:iter() do
 			if node.chs then branches:insert(node) end 
 		end
-		branches:sort(function(a,b) return a.depth > b.depth end)
+		branches:sort(function(a,b)
+			-- first sort by depth, so deepest are picked first
+			-- this way we always are collapsing leaves into our branch
+			if a.depth > b.depth then return true end
+			if a.depth < b.depth then return false end
+			-- then sort by point count within the nodes, smallest first?
+			if a.pts and b.pts then return #a.pts > #b.pts end
+		end)
 		
-		while n > 16 do
+		while n > targetSize do
 			local leaf = branches:remove(1)
 			assert(leaf, "how did you remove branches nodes without losing branches points?!?!?!?!?!?!?!!?!?")
 			leaf.pts = table.append(table.map(leaf.chs, function(ch, _, t) return ch.pts, #t+1 end):unpack())
 			leaf.chs = nil
-			n = countleaves()
+			n = root:countleaves()
 		end
 	end
 		
-	local fromto = {}
-	for node in root:iter() do
-		if node.pts then
-			-- reduce to the first node in the list
-			for _,pt in ipairs(node.pts) do
-				fromto[pt.key] = node.pts[1].key
-			end
-		end
-	end
-	args.wrapup(fromto)
+	args.done(root)
 end
 
 -- quantize each tile into a 16-color palette
-local dst = img:clone():clear()
+local targetPaletteSize = 16
 for y=0,th-1 do
 	for x=0,tw-1 do
 		local tile = tiles[1 + x + tw * y]
 		if tile then
---			print('x', x, 'y', y, 'hist count', #table.keys(tile.hist))
 			Reduce{
-				src = tile,
 				dim = 3,
+				targetSize = targetPaletteSize,
 				minv = 0,
 				maxv = 255,
-				wrapup = function(fromto)
+				splitSize = 1,
+				buildRoot = function(root)
+					for k,v in pairs(tile.hist) do
+						root:addToTree{
+							key = k,
+							pos = vector('double', {
+								bit.band(0xff, k),
+								bit.band(0xff, bit.rshift(k, 8)),
+								bit.band(0xff, bit.rshift(k, 16))
+							}),
+							weight = v,
+						}
+					end
+				end,
+				nodeGetChildIndex = function(node, pt)
+					return bit.bor(
+						pt.pos.v[0] >= node.mid.v[0] and 1 or 0,
+						pt.pos.v[1] >= node.mid.v[1] and 2 or 0,
+						pt.pos.v[2] >= node.mid.v[2] and 4 or 0)		
+				end,
+				nodeChildIndexHasBit = function(node, childIndex, b)
+					return bit.band(childIndex, bit.lshift(1,b)) ~= 0
+				end,
+				done = function(root)
 					-- ok now we can map pixel values and histogram keys via 'fromto'
+					local fromto = {}
+					for node in root:iter() do
+						if node.pts then
+							-- reduce to the first node in the list
+							for _,pt in ipairs(node.pts) do
+								fromto[pt.key] = node.pts[1].key
+							end
+						end
+					end				
+					-- TODO convert 'tile' *HERE* into an indexed image
 					for i=0,ts*ts-1 do
 						local p = tile.img.buffer + 3 * i
 						local key = bit.bor(p[0], bit.lshift(p[1], 8), bit.lshift(p[2], 16))
@@ -237,15 +252,123 @@ for y=0,th-1 do
 						newhist[tokey] = (newhist[tokey] or 0) + v
 					end
 					tile.hist = newhist
+					assert(#table.keys(tile.hist) <= targetPaletteSize)
 				end,
 			}
-			dst:pasteInto{x=x*ts, y=y*ts, image=tile.img}
+		end
+	end
+end
+
+local imgEachTilePalQuantTo16 = img:clone():clear()
+for y=0,th-1 do
+	for x=0,tw-1 do
+		local tile = tiles[1 + x + tw * y]
+		if tile then		
+			imgEachTilePalQuantTo16:pasteInto{x=x*ts, y=y*ts, image=tile.img}
 		end
 	end
 end
 local basefilename = filename:sub(1,-5)
-dst:save(basefilename..'-quant.png')
+imgEachTilePalQuantTo16:save(basefilename..'-quant.png')
 
+-- now reduce all our palettes, count of up to (w/8) x (h/8) palettes, each with 16 unique colors,
+-- down to 16 palettes with 16 colors
+do
+	local targetNumPalettes = 16
+	local dim = 3*targetPaletteSize
+	Reduce{
+		dim = dim,
+		targetSize = targetNumPalettes,
+		minv = 0,
+		maxv = 255,
+		splitSize = 1,	-- if this is too small then I get a stackoverflow ... and if it's too big then the quantization all reduces to a single repeated tile
+		buildRoot = function(root)
+			for y=0,th-1 do
+				for x=0,tw-1 do
+					local tile = tiles[1 + x + tw * y]
+					if tile then
+						local pal = vector('double', dim)
+						local keys = table.keys(tile.hist):sort()
+						assert(#keys <= targetPaletteSize)
+						for i,key in ipairs(keys) do
+							pal.v[0 + 3 * (i-1)] = bit.band(0xff, key)
+							pal.v[1 + 3 * (i-1)] = bit.band(0xff, bit.rshift(key, 8))
+							pal.v[2 + 3 * (i-1)] = bit.band(0xff, bit.rshift(key, 16))
+						end
+print('root leaves', root:countleaves())
+print('adding pal '..range(#pal):mapi(function(i) return pal.v[i-1] end):concat', ')
+						root:addToTree{
+							tile = tile,
+							pal = pal,
+						}
+					end
+				end
+			end
+		end,
+		nodeGetChildIndex = function(node, pt)
+			-- 48-bit vector ...
+			--				pt.pos.v[0] >= node.mid.v[0] and 1 or 0,
+			--				pt.pos.v[1] >= node.mid.v[1] and 2 or 0,
+			--				pt.pos.v[2] >= node.mid.v[2] and 4 or 0)		
+			-- but just convert 6 uint8's into chars and concat them
+			local numbytes = bit.rshift(dim, 3)
+			if bit.band(dim, 7) ~= 0 then numbytes = numbytes + 1 end
+assert(numbytes == 6)			
+			local k = range(numbytes):mapi(function() return 0 end)
+			for i=0,dim-1 do
+				local byteindex = bit.rshift(i, 3)
+				local bitindex = bit.band(i, 7)
+				if pt.pal.v[i] >= node.mid.v[i] then
+					k[byteindex+1] = bit.bor(k[byteindex+1], bit.lshift(1, bitindex))
+				end
+			end
+			return k:mapi(function(ch) return string.char(ch) end):concat()
+		end,
+		nodeChildIndexHasBit = function(node, childIndexKey, i)
+			local byteindex = bit.rshift(i, 3)
+			local bitindex = bit.band(i, 7)
+			local bytevalue = childIndexKey:byte(byteindex+1, byteindex+1)
+			
+			return bit.band(bytevalue, bit.lshift(1,bitindex)) ~= 0
+		end,
+		done = function(root)
+			-- ok now we can map pixel values and histogram keys via 'fromto'
+			local fromto = {}
+			for node in root:iter() do
+				if node.pts then
+					-- reduce to the first node in the list
+					for _,pt in ipairs(node.pts) do
+						-- if any square in the tilemap has tile pt.tile
+						-- then replace it with tile pts[1].tile
+						fromto[pt.tile] = node.pts[1].tile
+					end
+				end
+			end
+			for y=0,th-1 do
+				for x=0,tw-1 do
+					local index = 1 + x + tw * y
+					local tile = tiles[index]
+					if tile then
+						-- TODO don't just replace tiles, instead remap palettes
+						tiles[index] = fromto[tile]
+					end
+				end
+			end
+		end,
+	}
+end
+
+local imgQuantizedTo16TilesW16ColorsEach = img:clone():clear()
+for y=0,th-1 do
+	for x=0,tw-1 do
+		local tile = tiles[1 + x + tw * y]
+		if tile then		
+			imgQuantizedTo16TilesW16ColorsEach:pasteInto{x=x*ts, y=y*ts, image=tile.img}
+		end
+	end
+end
+local basefilename = filename:sub(1,-5)
+imgQuantizedTo16TilesW16ColorsEach:save(basefilename..'-quant-16tiles.png')
 
 
 -- now quantize each of the tile 16-color palettes (48-element vectors) into 16 unique palettes
