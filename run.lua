@@ -112,12 +112,31 @@ function Node:insert(pt)
 	end
 end
 
+function Node:map(f)
+	self = self or root
+	f(self)
+	if self.chs then
+		for _,ch in pairs(self.chs) do
+			ch:map(f)
+		end
+	end
+end
+
+function Node:iter()
+	return coroutine.wrap(function()
+		self:map(function(node)
+			coroutine.yield(node)
+		end)
+	end)
+end
+
 local Reduce = class()
 
 function Reduce:init(args)
 	local src = args.src
-	self.nodeClass = class(Node)
 	local dim = assert(args.dim)
+	
+	self.nodeClass = class(Node)
 	self.nodeClass.dim = dim
 	local root = self.nodeClass{
 		depth = 0,
@@ -146,32 +165,27 @@ function Reduce:init(args)
 		}
 	end
 	
-	local function map(f, node)
-		node = node or root
-		f(node)
-		if node.chs then
-			for _,ch in pairs(node.chs) do
-				map(f, ch)
-			end
-		end
-	end
 	local function countleaves()
 		local n = 0
-		map(function(node)
+		for node in root:iter() do
 			if node.pts then
 				n = n + 1
 			end
-		end)
+		end
 		return n
 	end
 	local n = countleaves()
 	if n > 16 then
 		local all = table()
-		map(function(node) all:insert(node) end)
+		for node in root:iter() do
+			all:insert(node) 
+		end
 		all:sort(function(a,b) return a.depth > b.depth end)
 		
 		local branches = table()
-		map(function(node) if node.chs then branches:insert(node) end end)
+		for node in root:iter() do
+			if node.chs then branches:insert(node) end 
+		end
 		branches:sort(function(a,b) return a.depth > b.depth end)
 		
 		while n > 16 do
@@ -184,30 +198,15 @@ function Reduce:init(args)
 	end
 		
 	local fromto = {}
-	map(function(node)
+	for node in root:iter() do
 		if node.pts then
 			-- reduce to the first node in the list
 			for _,pt in ipairs(node.pts) do
 				fromto[pt.key] = node.pts[1].key
 			end
 		end
-	end)
-
-	-- ok now we can map via 'fromto'
-	for i=0,ts*ts-1 do
-		local p = src.img.buffer + 3 * i
-		local key = bit.bor(p[0], bit.lshift(p[1], 8), bit.lshift(p[2], 16))
-		key = fromto[key]
-		p[0] = bit.band(0xff, key)
-		p[1] = bit.band(0xff, bit.rshift(key, 8))
-		p[2] = bit.band(0xff, bit.rshift(key, 16))
 	end
-	local newhist = {}
-	for k,v in pairs(src.hist) do
-		local tokey = fromto[k]
-		newhist[tokey] = (newhist[tokey] or 0) + v
-	end
-	src.hist = newhist
+	args.wrapup(fromto)
 end
 
 -- quantize each tile into a 16-color palette
@@ -217,7 +216,29 @@ for y=0,th-1 do
 		local tile = tiles[1 + x + tw * y]
 		if tile then
 --			print('x', x, 'y', y, 'hist count', #table.keys(tile.hist))
-			Reduce{src=tile, dim=3, minv=0, maxv=255}
+			Reduce{
+				src = tile,
+				dim = 3,
+				minv = 0,
+				maxv = 255,
+				wrapup = function(fromto)
+					-- ok now we can map pixel values and histogram keys via 'fromto'
+					for i=0,ts*ts-1 do
+						local p = tile.img.buffer + 3 * i
+						local key = bit.bor(p[0], bit.lshift(p[1], 8), bit.lshift(p[2], 16))
+						key = fromto[key]
+						p[0] = bit.band(0xff, key)
+						p[1] = bit.band(0xff, bit.rshift(key, 8))
+						p[2] = bit.band(0xff, bit.rshift(key, 16))
+					end
+					local newhist = {}
+					for k,v in pairs(tile.hist) do
+						local tokey = fromto[k]
+						newhist[tokey] = (newhist[tokey] or 0) + v
+					end
+					tile.hist = newhist
+				end,
+			}
 			dst:pasteInto{x=x*ts, y=y*ts, image=tile.img}
 		end
 	end
