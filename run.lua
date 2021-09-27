@@ -1,382 +1,442 @@
 #! /usr/bin/env luajit
 local ffi = require 'ffi'
 local bit = require 'bit'
+local os = require 'ext.os'
 local table = require 'ext.table'
 local range = require 'ext.range'
-local class = require 'ext.class'
 local tolua = require 'ext.tolua'
+local vector = require 'ffi.cpp.vector'
 local Image = require 'image'
+
+local quantize = require 'quantize'.quantize
+local buildHistogram = require 'quantize'.buildHistogram
+local reduceColors = require 'quantize'.reduceColors
 
 local filename = ... or 'map-tex-small-brighter.png'
 local img = Image(filename)
+local basefilename = filename:sub(1,-5)
 
 -- alright, now to convert this into a 256-color paletted image such that no 8x8 tile uses more than 16 colors, and no set of 16 colors isn't shared or whatever
+
+local function splitImageIntoTiles(img, tileSize)
+	assert(img.channels == 3)
+	-- TODO strict enforcement? or just reshape/grow subtiles to be tileSize x tileSize?
+	--assert(img.width % tileSize == 0)
+	--assert(img.height % tileSize == 0)
+	local tilesWide = math.floor(img.width / tileSize)
+	local tilesHigh = math.floor(img.height / tileSize)
+
+	local tiles = table()
+	for y=0,tilesHigh-1 do
+		for x=0,tilesWide-1 do
+			local tileimg = img:copy{x=x*tileSize, y=y*tileSize, width=tileSize, height=tileSize}
+			local hist = buildHistogram(tileimg)
+			local keys = table.keys(hist)
+			-- all black <-> don't use
+			if #keys == 1 and keys[1] == 0 then
+				hist = {}
+				keys = {}
+			end
+			if #keys > 0 then
+				tiles[1 + x + tilesWide * y] = {
+					img = tileimg,
+					hist = hist,
+				}
+			end
+		end
+	end
+	return tiles, tilesWide, tilesHigh
+end
+
+local function rebuildTiles(tiles, tileSize, tilesWide, tilesHigh)
+	local first = assert(select(2, tiles:find(nil, function(tile) return tile.img end)), "couldn't find a single tile with an image").img
+	local result = Image(tileSize*tilesWide, tileSize*tilesHigh, first.channels, first.format)
+	result:clear()
+	for y=0,tilesHigh-1 do
+		for x=0,tilesWide-1 do
+			local tile = tiles[1 + x + tilesWide * y]
+			if tile then		
+				result:pasteInto{x=x*tileSize, y=y*tileSize, image=tile.img}
+			end
+		end
+	end
+	return result
+end
+
 local ts = 8
-assert(img.channels == 3)
-assert(img.width % ts == 0)
-assert(img.height % ts == 0)
-local tw = math.floor(img.width / ts)
-local th = math.floor(img.height / ts)
-local tiles = table()
+local tiles, tw, th = splitImageIntoTiles(img, ts)
 
-for y=0,th-1 do
-	for x=0,tw-1 do
-		local tileimg = img:copy{x=x*ts, y=y*ts, width=ts, height=ts}
-		local hist = {}	-- key = 0xggbbrr
-		for j=0,ts-1 do
-			for i=0,ts-1 do
-				local p = tileimg.buffer + 3 * (i + ts * j)
-				local key = bit.bor(p[0], bit.lshift(p[1], 8), bit.lshift(p[2], 16))
-				hist[key] = (hist[key] or 0) + 1
-			end
-		end
-		local keys = table.keys(hist)
-		-- all black <-> don't use
-		if #keys == 1 and keys[1] == 0 then
-			hist = {}
-			keys = {}
-		end
-		if #keys > 0 then
-			tiles[1 + x + tw * y] = {
-				img = tileimg,
-				hist = hist,
-			}
-		end
+local option = 'A'
+--local option = 'B'
+
+if option == 'A' then -- option A: chop the pic into tiles, quantize each tile to 16 colors, then somehow merge tile palettes and further quantize to get 16 sets of 16 colors
+
+	-- quantize each tile into a 16-color palette
+	-- reduce to 15 colors so we always have 1 transparent color per palette
+	local targetPaletteSize = 15
+	for _,tile in pairs(tiles) do
+		tile.img, tile.hist = reduceColors(tile.img, targetPaletteSize, tile.hist)
 	end
-end
 
-local vector = require 'ffi.cpp.vector'
-
-local Node = class()
-
-Node.dim = 3
-
-function Node:init(args)
-	for k,v in pairs(args) do
-		self[k] = v
+	local function histToPal(hist)
+		return table.keys(hist):sort():mapi(function(key)
+			local r = bit.band(0xff, key)
+			local g = bit.band(0xff, bit.rshift(key, 8))
+			local b = bit.band(0xff, bit.rshift(key, 16))
+			return string.char(r)..string.char(g)..string.char(b)
+		end):sort():concat()
 	end
-end
 
-function Node:getChildForIndex(k)
-	local ch = self.chs[k]
-	if ch then return ch end
+	-- build palettes for each - as 48-byte strings
+	for _,tile in pairs(tiles) do
+		tile.pal = histToPal(tile.hist) 
+	end
 
-	local ch = self.class{
-		depth = self.depth + 1,
-		min = vector('double', self.dim),
-		mid = vector('double', self.dim),
-		max = vector('double', self.dim),
-		pts = table(),
-	}
-	self.chs[k] = ch
-	
-	for j=0,self.dim-1 do
-		if not self:childIndexHasBit(k, j) then
-			ch.min.v[j] = self.min.v[j]
-			ch.max.v[j] = self.mid.v[j]
-		else
-			ch.min.v[j] = self.mid.v[j]
-			ch.max.v[j] = self.max.v[j]
-		end
-		ch.mid.v[j] = (ch.min.v[j] + ch.max.v[j]) * .5
+	-- alright now we have our tiles, each with palette of 1 <= #pal <= 16 colors, but some have less, so now lets merge any palettes that are subsets of other palettes
+	local tilesForPal = {}
+	for _,tile in pairs(tiles) do
+		tilesForPal[tile.pal] = tilesForPal[tile.pal] or table()
+		tilesForPal[tile.pal]:insert(tile)
 	end
 	
-	return ch
-end
+	local allPalettes = table.keys(tilesForPal)
+	allPalettes:sort(sort)
+	print('how many unique palettes? '..#allPalettes)
 
-function Node:addToTree(pt)
-	if self.chs then
-		assert(not self.pts)
-		self:getChildForIndex(self:getChildIndex(pt)):addToTree(pt)
-	else
-		assert(not self.chs)
-		self.pts:insert(pt)
-		if #self.pts > self.splitSize then	-- split
-			-- create upon request
-			self.chs = {}
-			local pts = self.pts
-			self.pts = nil
-			for _,pt in ipairs(pts) do
-				self:addToTree(pt)
-			end
-		end
+	-- sort, largest first, try to merge smaller into larger palettes
+	local function sort(a,b)
+		if #a > #b then return true end
+		if #a < #b then return false end
+		return a < b
 	end
-end
 
-function Node:iterRecurse()
-	coroutine.yield(self)
-	if self.chs then
-		for _,ch in pairs(self.chs) do
-			ch:iterRecurse()
-		end
+	local function bintohex(s)
+		return (s:gsub('.', function(c) return ('%02x'):format(c:byte()) end))
 	end
-end
-
-function Node:iter()
-	return coroutine.wrap(function()
-		self:iterRecurse()
-	end)
-end
-
-function Node:countleaves()
-	local n = 0
-	for node in self:iter() do
-		if node.pts then
-			n = n + 1
-		end
-	end
-	return n
-end
-
-
-local Reduce = class()
-
-function Reduce:init(args)
-	local dim = assert(args.dim)
-	local targetSize = assert(args.targetSize)
-
-	self.nodeClass = class(Node)
-	self.nodeClass.dim = dim
-	self.nodeClass.splitSize = assert(args.splitSize)
-
-	-- returns a value that can be uniquely mapped from 0..2^dim-1
-	self.nodeClass.getChildIndex = assert(args.nodeGetChildIndex)
 	
-	--[[
-	childIndex in 0..2^dim-1
-	b in 0..dim-1
-	--]]
-	self.nodeClass.childIndexHasBit = assert(args.nodeChildIndexHasBit)
-
-	local root = self.nodeClass{
-		depth = 0,
-		min = vector('double', dim),
-		mid = vector('double', dim),
-		max = vector('double', dim),
-		pts = table(),	-- .pt, .weight
-	}
-	local minv = assert(args.minv)
-	local maxv = assert(args.maxv)
-	for i=0,dim-1 do
-		root.min.v[i] = minv
-		root.max.v[i] = maxv
-		root.mid.v[i] = (minv + maxv) * .5
-	end
-
-	args.buildRoot(root)
+--	print("palettes before merges:")
+--	print(allPalettes:mapi(bintohex):concat'\n')
 	
-	local n = root:countleaves()
-	if n > targetSize then
-		local branches = table()
-		for node in root:iter() do
-			if node.chs then branches:insert(node) end 
+	local function strToSetOfColors(str)
+		local cs = {}
+		for i=1,#str,3 do
+			cs[str:sub(i,i+2)] = true
 		end
-		branches:sort(function(a,b)
-			-- first sort by depth, so deepest are picked first
-			-- this way we always are collapsing leaves into our branch
-			if a.depth > b.depth then return true end
-			if a.depth < b.depth then return false end
-			-- then sort by point count within the nodes, smallest first?
-			if a.pts and b.pts then return #a.pts > #b.pts end
-		end)
-		
-		while n > targetSize do
-			local leaf = branches:remove(1)
-			assert(leaf, "how did you remove branches nodes without losing branches points?!?!?!?!?!?!?!!?!?")
-			leaf.pts = table.append(table.map(leaf.chs, function(ch, _, t) return ch.pts, #t+1 end):unpack())
-			leaf.chs = nil
-			n = root:countleaves()
-		end
+		return cs
 	end
-		
-	args.done(root)
-end
 
--- quantize each tile into a 16-color palette
-local targetPaletteSize = 16
-for y=0,th-1 do
-	for x=0,tw-1 do
-		local tile = tiles[1 + x + tw * y]
-		if tile then
-			Reduce{
-				dim = 3,
-				targetSize = targetPaletteSize,
-				minv = 0,
-				maxv = 255,
-				splitSize = 1,
-				buildRoot = function(root)
-					for k,v in pairs(tile.hist) do
-						root:addToTree{
-							key = k,
-							pos = vector('double', {
-								bit.band(0xff, k),
-								bit.band(0xff, bit.rshift(k, 8)),
-								bit.band(0xff, bit.rshift(k, 16))
-							}),
-							weight = v,
-						}
-					end
-				end,
-				nodeGetChildIndex = function(node, pt)
-					return bit.bor(
-						pt.pos.v[0] >= node.mid.v[0] and 1 or 0,
-						pt.pos.v[1] >= node.mid.v[1] and 2 or 0,
-						pt.pos.v[2] >= node.mid.v[2] and 4 or 0)		
-				end,
-				nodeChildIndexHasBit = function(node, childIndex, b)
-					return bit.band(childIndex, bit.lshift(1,b)) ~= 0
-				end,
-				done = function(root)
-					-- ok now we can map pixel values and histogram keys via 'fromto'
-					local fromto = {}
-					for node in root:iter() do
-						if node.pts then
-							-- reduce to the first node in the list
-							for _,pt in ipairs(node.pts) do
-								fromto[pt.key] = node.pts[1].key
-							end
-						end
-					end				
-					-- TODO convert 'tile' *HERE* into an indexed image
-					for i=0,ts*ts-1 do
-						local p = tile.img.buffer + 3 * i
-						local key = bit.bor(p[0], bit.lshift(p[1], 8), bit.lshift(p[2], 16))
-						key = fromto[key]
-						p[0] = bit.band(0xff, key)
-						p[1] = bit.band(0xff, bit.rshift(key, 8))
-						p[2] = bit.band(0xff, bit.rshift(key, 16))
-					end
-					local newhist = {}
-					for k,v in pairs(tile.hist) do
-						local tokey = fromto[k]
-						newhist[tokey] = (newhist[tokey] or 0) + v
-					end
-					tile.hist = newhist
-					assert(#table.keys(tile.hist) <= targetPaletteSize)
-				end,
-			}
-		end
-	end
-end
-
-local imgEachTilePalQuantTo16 = img:clone():clear()
-for y=0,th-1 do
-	for x=0,tw-1 do
-		local tile = tiles[1 + x + tw * y]
-		if tile then		
-			imgEachTilePalQuantTo16:pasteInto{x=x*ts, y=y*ts, image=tile.img}
-		end
-	end
-end
-local basefilename = filename:sub(1,-5)
-imgEachTilePalQuantTo16:save(basefilename..'-quant.png')
-
--- now reduce all our palettes, count of up to (w/8) x (h/8) palettes, each with 16 unique colors,
--- down to 16 palettes with 16 colors
-do
-	local targetNumPalettes = 16
-	local dim = 3*targetPaletteSize
-	Reduce{
-		dim = dim,
-		targetSize = targetNumPalettes,
-		minv = 0,
-		maxv = 255,
-		splitSize = 1,	-- if this is too small then I get a stackoverflow ... and if it's too big then the quantization all reduces to a single repeated tile
-		buildRoot = function(root)
-			for y=0,th-1 do
-				for x=0,tw-1 do
-					local tile = tiles[1 + x + tw * y]
-					if tile then
-						local pal = vector('double', dim)
-						local keys = table.keys(tile.hist):sort()
-						assert(#keys <= targetPaletteSize)
-						for i,key in ipairs(keys) do
-							pal.v[0 + 3 * (i-1)] = bit.band(0xff, key)
-							pal.v[1 + 3 * (i-1)] = bit.band(0xff, bit.rshift(key, 8))
-							pal.v[2 + 3 * (i-1)] = bit.band(0xff, bit.rshift(key, 16))
-						end
-print('root leaves', root:countleaves())
-print('adding pal '..range(#pal):mapi(function(i) return pal.v[i-1] end):concat', ')
-						root:addToTree{
-							tile = tile,
-							pal = pal,
-						}
-					end
+	for i=#allPalettes,1,-1 do
+		local pi = allPalettes[i]
+		local ci = strToSetOfColors(pi)
+		for j=1,i-1 do
+			local pj = allPalettes[j]
+			local cj = strToSetOfColors(pj)
+			
+			local iIsSubsetOfJ = true
+			for c,_ in pairs(ci) do
+				if not cj[c] then
+					iIsSubsetOfJ = false
+					break
 				end
 			end
-		end,
-		nodeGetChildIndex = function(node, pt)
-			-- 48-bit vector ...
-			--				pt.pos.v[0] >= node.mid.v[0] and 1 or 0,
-			--				pt.pos.v[1] >= node.mid.v[1] and 2 or 0,
-			--				pt.pos.v[2] >= node.mid.v[2] and 4 or 0)		
-			-- but just convert 6 uint8's into chars and concat them
-			local numbytes = bit.rshift(dim, 3)
-			if bit.band(dim, 7) ~= 0 then numbytes = numbytes + 1 end
+
+			if iIsSubsetOfJ then
+				-- merge tiles of pi into tiles of pj
+				tilesForPal[pj]:append(tilesForPal[pi])
+				tilesForPal[pi] = nil
+				-- remove palette pi
+				allPalettes:remove(i)
+				-- reassign palettes
+				for _,tile in ipairs(tilesForPal[pj]) do
+					tile.pal = pj
+				end
+				break
+			end
+		end
+	end
+
+	allPalettes:sort(sort)
+	
+	print('after merge, how many unique palettes? '..#allPalettes)
+--	print("palettes after merges:")
+--	print(allPalettes:mapi(bintohex):concat'\n')
+
+	-- recombine smaller palettes
+	do
+		local found = false
+		repeat
+			found = false
+			for i=#allPalettes,1,-1 do
+				local pi = allPalettes[i]
+				for j=i-1,1,-1 do
+					local pj = allPalettes[j]
+					if #pi + #pj <= 2*3*targetPaletteSize then		-- 2 chars per hex byte * 3 r g b bytes * 16 colors in the tile palette
+						local pk = pi .. pj
+						-- sort the colors?
+						local cs = table()
+						for w in pk:gmatch'...' do cs:insert(w) end
+						cs:sort()
+						pk = cs:concat()
+
+						assert(pk ~= pi and pk ~= pj)
+						tilesForPal[pk] = tilesForPal[pi]:append(tilesForPal[pj])
+						tilesForPal[pi] = nil
+						tilesForPal[pj] = nil
+						allPalettes:removeObject(pi)
+						allPalettes:removeObject(pj)
+						allPalettes:insert(pk)
+						-- reassign palettes
+						for _,tile in ipairs(tilesForPal[pk]) do
+							tile.pal = pk
+print('reassigning tile')
+print('hist', bintohex(histToPal(tile.hist)))
+print('pal', bintohex(tile.pal))
+						end
+						found = true
+						break
+					end
+				end
+				if found then break end
+			end
+		until not found
+	end
+	allPalettes:sort(sort)
+
+	print('after combining smaller palettes, how many unique palettes? '..#allPalettes)
+--	print("palettes after combine:")
+--	print(allPalettes:mapi(bintohex):concat'\n')
+
+	
+
+	-- rebuild and see what it looks like
+	rebuildTiles(tiles, ts, tw, th):save(basefilename..'-tiles-16colors.png')
+
+	-- now reduce all our palettes, count of up to (w/8) x (h/8) palettes, each with 16 unique colors,
+	-- down to 16 palettes with 16 colors
+	do
+		local targetNumPalettes = 16
+		local dim = 3*targetPaletteSize
+		quantize{
+			dim = dim,
+			targetSize = targetNumPalettes,
+			minv = 0,
+			maxv = 255,
+			splitSize = 1,	-- if this is too small then I get a stackoverflow ... and if it's too big then the quantization all reduces to a single repeated tile
+			buildRoot = function(root)
+				for _,palstr in pairs(allPalettes) do
+					
+					local keys = table()
+					for w in palstr:gmatch'......' do
+						keys:insert(w)
+					end
+					keys:sort()
+					assert(#keys <= targetPaletteSize)
+					
+					local pal = vector('double', dim)
+					for i,key in ipairs(keys) do
+						pal.v[0 + 3 * (i-1)] = key:byte(1,1)
+						pal.v[1 + 3 * (i-1)] = key:byte(2,2)
+						pal.v[2 + 3 * (i-1)] = key:byte(3,3)
+					end
+					root:addToTree{
+						palstr = palstr,
+						pal = pal,
+					}
+				end
+			end,
+			nodeGetChildIndex = function(node, pt)
+				-- 48-bit vector ...
+				--				pt.pos.v[0] >= node.mid.v[0] and 1 or 0,
+				--				pt.pos.v[1] >= node.mid.v[1] and 2 or 0,
+				--				pt.pos.v[2] >= node.mid.v[2] and 4 or 0)		
+				-- but just convert 6 uint8's into chars and concat them
+				local numbytes = bit.rshift(dim, 3)
+				if bit.band(dim, 7) ~= 0 then numbytes = numbytes + 1 end
 assert(numbytes == 6)			
-			local k = range(numbytes):mapi(function() return 0 end)
-			for i=0,dim-1 do
+				local k = range(numbytes):mapi(function() return 0 end)
+				for i=0,dim-1 do
+					local byteindex = bit.rshift(i, 3)
+					local bitindex = bit.band(i, 7)
+					if pt.pal.v[i] >= node.mid.v[i] then
+						k[byteindex+1] = bit.bor(k[byteindex+1], bit.lshift(1, bitindex))
+					end
+				end
+				return k:mapi(function(ch) return string.char(ch) end):concat()
+			end,
+			nodeChildIndexHasBit = function(node, childIndexKey, i)
 				local byteindex = bit.rshift(i, 3)
 				local bitindex = bit.band(i, 7)
-				if pt.pal.v[i] >= node.mid.v[i] then
-					k[byteindex+1] = bit.bor(k[byteindex+1], bit.lshift(1, bitindex))
-				end
-			end
-			return k:mapi(function(ch) return string.char(ch) end):concat()
-		end,
-		nodeChildIndexHasBit = function(node, childIndexKey, i)
-			local byteindex = bit.rshift(i, 3)
-			local bitindex = bit.band(i, 7)
-			local bytevalue = childIndexKey:byte(byteindex+1, byteindex+1)
-			
-			return bit.band(bytevalue, bit.lshift(1,bitindex)) ~= 0
-		end,
-		done = function(root)
-			-- ok now we can map pixel values and histogram keys via 'fromto'
-			local fromto = {}
-			for node in root:iter() do
-				if node.pts then
-					-- reduce to the first node in the list
-					for _,pt in ipairs(node.pts) do
-						-- if any square in the tilemap has tile pt.tile
-						-- then replace it with tile pts[1].tile
-						fromto[pt.tile] = node.pts[1].tile
-					end
-				end
-			end
-			for y=0,th-1 do
-				for x=0,tw-1 do
-					local index = 1 + x + tw * y
-					local tile = tiles[index]
-					if tile then
-						-- TODO don't just replace tiles, instead remap palettes
-						tiles[index] = fromto[tile]
-					end
-				end
-			end
-		end,
-	}
-end
+				local bytevalue = childIndexKey:byte(byteindex+1, byteindex+1)
+				
+				return bit.band(bytevalue, bit.lshift(1,bitindex)) ~= 0
+			end,
+			done = function(root)
+				
+				print('done')
 
-local imgQuantizedTo16TilesW16ColorsEach = img:clone():clear()
-for y=0,th-1 do
-	for x=0,tw-1 do
-		local tile = tiles[1 + x + tw * y]
-		if tile then		
-			imgQuantizedTo16TilesW16ColorsEach:pasteInto{x=x*ts, y=y*ts, image=tile.img}
+				print('creating mapping of palstrs back to first in node ...')
+				-- ok now we can map pixel values and histogram keys via 'fromtoPals'
+				local fromtoPals = {}
+				for node in root:iter() do
+					if node.pts then
+						-- TODO INSTEAD reduce the palettes, and then do the remapping to the palettes of each tile
+						-- reduce to the first node in the list
+						for _,pt in ipairs(node.pts) do
+							-- if any square in the tilemap has tile pt.tile
+							-- then replace it with tile pts[1].tile
+							fromtoPals[pt.palstr] = node.pts[1].palstr
+						end
+					end
+				end
+			
+				--[[
+				print('consolidating tiles in tilesForPal...')
+				for from, to in pairs(fromtoPals) do
+					tilesForPal[to] = (tilesForPal[to] or table()):append(tilesForPal[from])
+					tilesForPal[from] = nil
+					allPalettes:removeObject(from)
+				end
+				--]]
+				
+				print('remapping colors in individual tiles...')
+
+				-- fromtocolorsPerPal[frompalstr][topalstr] = { [fromcolor] = tocolor } where fromcolor and tocolor are 24-bit integers
+				local fromtocolorsPerPal = {}
+		
+				local vec3ub = require 'vec-ffi.vec3ub'
+				local vec3d = require 'vec-ffi.vec3d'
+				-- reassign palettes
+				--for topal,tiles in pairs(tilesForPal) do
+				for _,tile in pairs(tiles) do
+					local frompal = tile.pal
+assert(#frompal % 3 == 0)
+					local topal = assert(fromtoPals[frompal])
+assert(#topal % 3 == 0)
+					if frompal ~= topal then
+					
+						local toc = table()
+						for w in topal:gmatch'......' do
+							toc:insert(vec3ub(w:byte(1,3)))
+						end
+
+						if not fromtocolorsPerPal[frompal] then fromtocolorsPerPal[frompal] = {} end
+						local fromto = fromtocolorsPerPal[frompal][topal]
+						if not fromto then
+print("building from<->to map for palettes:")
+print('frompal', bintohex(frompal))
+print('topal',	bintohex(topal))
+print('from hist', bintohex(histToPal(tile.hist)))
+							fromto = {}
+							fromtocolorsPerPal[frompal][topal] = fromto
+							for w in frompal:gmatch'...' do
+								local fromc = vec3ub(w:byte(1,3))
+								local fromcolorint = bit.bor(
+									fromc.x,
+									bit.lshift(fromc.y, 8),
+									bit.lshift(fromc.z, 16))
+								local bestDist
+								local bestc
+								for _,c in ipairs(toc) do
+									local dist = (vec3d(fromc:unpack()) - vec3d(c:unpack())):lenSq()
+									if not bestDist or dist < bestDist then
+										bestDist = dist
+										bestc = c
+									end
+								end
+								local tocolorint = bit.bor(
+									bestc.x,
+									bit.lshift(bestc.y, 8),
+									bit.lshift(bestc.z, 16)
+								)
+print("adding entry from "..("%06x"):format(fromcolorint).." to "..('%06x'):format(tocolorint))
+								fromto[fromcolorint] = tocolorint
+							end
+						end
+						for i=0,tile.img.width*tile.img.height-1 do
+							local p = tile.img.buffer + 3 * i
+							local fromcolorint = bit.bor(p[0], bit.lshift(p[1], 8), bit.lshift(p[2], 16))
+							local tocolorint = fromto[fromcolorint]
+							if not tocolorint then
+								error("found a color not in the palette (that's why I should index the images) "
+									..('%06x'):format(fromcolorint))
+							end
+							p[0] = bit.band(0xff, tocolorint)
+							p[1] = bit.band(0xff, bit.rshift(tocolorint, 8))
+							p[2] = bit.band(0xff, bit.rshift(tocolorint, 16))
+						end
+					
+						tile.pal = topal
+					end
+				end
+				-- TODO now recolor the picture based on the old->new palettes
+
+			end,
+		}
+	end
+	
+	-- rebuild and see what it looks like
+	rebuildTiles(tiles, ts, tw, th):save(basefilename..'-16tiles-16colors.png')
+
+
+	-- now quantize each of the tile 16-color palettes (48-element vectors) into 16 unique palettes
+	-- ok 3-dim vectors means up to 2^3==8 children
+	-- so 48-dim vectors means up to 2^48 == 2.8147497671066e+14 children
+	-- so ... 1) load child table sparsely  and 2) key by something with 48 bits of precision (uint64_t eh? if you can key by cdata?  you can but it keys by the obj ptr, so two cdata identical values are different keys ..
+	--  ... so key children by lua string of concatenated values ... 6 1-byte characters
+
+	-- challenge #1: find a set of 256 colors such that every tile is only 16 colors and there are only 16 sets of 16 colors used throughout the image
+
+	-- first reduce each tile to only use 16 colors
+
+
+elseif option == 'B' then
+
+-- option B: just quantize the whole picture into 256 colors:
+	local imageQuant256Filename = basefilename..'-256color.png'
+	local imageQuant256, hist
+	if not os.fileexists(imageQuant256Filename) then
+		-- slow
+		imageQuant256, hist = reduceColors(img, 256)
+		imageQuant256:save(imageQuant256Filename)
+	else
+		imageQuant256 = Image(imageQuant256Filename)
+		hist = buildHistogram(imageQuant256)
+	end
+
+	-- then split up the 256 color image into tiles, and group/reduce the palette colors across those tiles
+	local tiles, tw, th = splitImageIntoTiles(imageQuant256, ts)
+
+	for y=0,th-1 do
+		for x=0,tw-1 do
+			local tile = tiles[1 + x + tw * y]
+			if tile then
+				-- reduce each to 16 colors.  they're almost there.
+				-- TODO make sure the reduceColors() algorithm REPLACE and doesn't CHANGE any colors
+				-- right now that's what it does.
+				-- otherwise this will get out of sync with our pic's overall 256 colors
+				tile.img, tile.hist = reduceColors(tile.img, 16, tile.hist)
+			end
 		end
 	end
+				
+	--print(x, y, #table.keys(tile.hist))	
+
+	rebuildTiles(tiles, ts, tw, th):save(basefilename..'-256color-to-16color-tiles.png')
+
+	-- ok now ... group our colors in 16 groups of 16 colors
+	-- with bias for grouping by individual tiles' 16 colors
+	-- (but not limited to -- esp if tiles have <16 colors
+	-- and then 
+
+
+else
+--[[ option C - reduce the 16 colors for 16 tiles at once?
+minimize c_ij (i'th color of j'th palette)
+such that pixels in t_k are only in one single palette p_m = {c_mj}
+
+soo ... hopfield network?
+--]]
+
+
+	error'here'
 end
-local basefilename = filename:sub(1,-5)
-imgQuantizedTo16TilesW16ColorsEach:save(basefilename..'-quant-16tiles.png')
-
-
--- now quantize each of the tile 16-color palettes (48-element vectors) into 16 unique palettes
--- ok 3-dim vectors means up to 2^3==8 children
--- so 48-dim vectors means up to 2^48 == 2.8147497671066e+14 children
--- so ... 1) load child table sparsely  and 2) key by something with 48 bits of precision (uint64_t eh? if you can key by cdata?  you can but it keys by the obj ptr, so two cdata identical values are different keys ..
---  ... so key children by lua string of concatenated values ... 6 1-byte characters
-
--- challenge #1: find a set of 256 colors such that every tile is only 16 colors and there are only 16 sets of 16 colors used throughout the image
-
--- first reduce each tile to only use 16 colors
