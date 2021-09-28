@@ -1,18 +1,20 @@
 local bit = require 'bit'
 local vector = require 'ffi.cpp.vector'
 local table = require 'ext.table'
-local quantize = require 'quantize'
+local quantizeOctree = require 'quantizeoctree'
 local buildHistogram = require 'buildhistogram'
 local int24to8x8x8 = require 'int24to8x8x8'
 local int8x8x8to24 = require 'int8x8x8to24'
 
-local function reduceColors(img, numColors, hist)
-	hist = hist or buildHistogram(img)
+local function reduceColorsOctree(args)
+	local img = assert(args.img)
+	local targetSize = assert(args.targetSize)
+	local hist = args.hist or buildHistogram(img)
 
 	img = img:clone()
-	quantize{
+	quantizeOctree{
 		dim = 3,
-		targetSize = numColors,
+		targetSize = targetSize,
 		minv = 0,
 		maxv = 255,
 		splitSize = 1,	-- pt per node
@@ -57,11 +59,11 @@ local function reduceColors(img, numColors, hist)
 				newhist[tokey] = (newhist[tokey] or 0) + v
 			end
 			hist = newhist
-			assert(#table.keys(hist) <= numColors)
+			assert(#table.keys(hist) <= targetSize)
 		end,
 	}
 
 	return img, hist
 end
 
-return reduceColors
+return reduceColorsOctree

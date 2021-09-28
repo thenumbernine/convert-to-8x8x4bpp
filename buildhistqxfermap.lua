@@ -3,11 +3,11 @@ local table = require 'ext.table'
 local function buildHistogramQuantizationTransferMap(args)
 	local hist = assert(args.hist)
 	local targetSize = assert(args.targetSize)
-	
+
 	-- just needs to be increasing wrt the actual dist, doesn't need to be exact, used for comparison for merging closest points
 	local calcPtDist = assert(args.dist)
-
 	local mergePts = assert(args.merge)
+	local progress = args.progress
 
 	local colors = table.keys(hist):sort(function(a,b)
 		return hist[a] < hist[b]	-- sorting doesn't matter
@@ -39,8 +39,20 @@ local function buildHistogramQuantizationTransferMap(args)
 	for _,c in ipairs(colors) do
 		fromto[c] = c
 	end
-	
+
+	local startTime = os.time()
+	local lastTime = startTime 
+	local initNumColors = #colors
+
 	while #colors > targetSize do
+		if progress then
+			local thisTime = os.time()
+			if thisTime ~= lastTime then
+				lastTime = thisTime
+				progress( (#colors - initNumColors) / (targetSize - initNumColors), thisTime - startTime, #colors)
+			end
+		end
+
 		pairsForDists:sort(function(a,b) return a[3] > b[3] end)
 	
 		-- now merge closest pairs, lerp by weights of each

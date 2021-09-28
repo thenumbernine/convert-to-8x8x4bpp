@@ -5,7 +5,8 @@ and vec3d with vector'double'
 and then generalize by dimension
 --]]
 local table = require 'ext.table'
-	
+
+local buildHistogram = require 'buildhistogram'
 local buildHistogramQuantizationTransferMap = require 'buildhistqxfermap'
 local applyHistogramQuantizationTransferMap = require 'applyhistqxfermap'
 
@@ -43,17 +44,20 @@ local function replaceStrKeysWithInts(t)
 end
 
 
-
-local function reduceColorsLinear(img, targetPaletteSize, hist)
+local function reduceColorsLinear(args)
+	local img = assert(args.img)
+	local targetSize = assert(args.targetSize)
+	local hist = args.hist or buildHistogram(img)
 
 	hist = replaceIntKeysWithStrs(hist, 3)
 	
 	local fromto
 	hist, fromto = buildHistogramQuantizationTransferMap{
 		hist = hist,
-		targetSize = targetPaletteSize,
+		targetSize = targetSize,
 		dist = require 'bindistsq',
 		merge = require 'binweightedmerge',
+		progress = args.progress,
 	}
 	
 	img = applyHistogramQuantizationTransferMap(img, fromto)

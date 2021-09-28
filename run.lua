@@ -12,9 +12,11 @@ local vec3ub = require 'vec-ffi.vec3ub'
 local vec3d = require 'vec-ffi.vec3d'
 local Image = require 'image'
 
+local reduceColorsLinear = require 'reducecolorslinear'
+local buildHistogramQuantizationTransferMap = require 'buildhistqxfermap'
 local buildHistogram = require 'buildhistogram'
-local quantize = require 'quantize'
-local reduceColors = require 'reducecolors'
+local quantizeOctree = require 'quantizeoctree'	-- TODO rename to 'quantizeoctree' or something
+local reduceColorsOctree = require 'reducecolorsoctree'
 local bintohex = require 'bintohex'
 local int24to8x8x8 = require 'int24to8x8x8'
 local int8x8x8to24 = require 'int8x8x8to24'
@@ -76,8 +78,8 @@ local tiles, tw, th = splitImageIntoTiles(img, ts)
 --local option = 'A'
 --local option = 'B'
 --local option = 'C'
-local option = 'D'
---local option = 'E'
+--local option = 'D'
+local option = 'E'
 
 
 -- option A: chop the pic into tiles, quantize each tile to 16 colors, then somehow merge tile palettes and further quantize to get 16 sets of 16 colors
@@ -88,7 +90,7 @@ if option == 'A' then
 	-- reduce to 15 colors so we always have 1 transparent color per palette
 	local targetPaletteSize = 15
 	for _,tile in pairs(tiles) do
-		tile.img, tile.hist = reduceColors(tile.img, targetPaletteSize, tile.hist)
+		tile.img, tile.hist = reduceColorsOctree{img=tile.img, targetSize=targetPaletteSize, hist=tile.hist}
 	end
 
 	local function histToPal(hist)
@@ -223,7 +225,7 @@ print('pal', bintohex(tile.pal))
 	do
 		local targetNumPalettes = 16
 		local dim = 3*targetPaletteSize
-		quantize{
+		quantizeOctree{
 			dim = dim,
 			targetSize = targetNumPalettes,
 			minv = 0,
@@ -393,7 +395,7 @@ elseif option == 'B' then
 	local imageQuant256, hist
 	if not os.fileexists(imageQuant256Filename) then
 		-- slow
-		imageQuant256, hist = reduceColors(img, 256)
+		imageQuant256, hist = reduceColorsOctree{img=img, targetSize=256}
 		imageQuant256:save(imageQuant256Filename)
 	else
 		imageQuant256 = Image(imageQuant256Filename)
@@ -408,10 +410,10 @@ elseif option == 'B' then
 			local tile = tiles[1 + x + tw * y]
 			if tile then
 				-- reduce each to 16 colors.  they're almost there.
-				-- TODO make sure the reduceColors() algorithm REPLACE and doesn't CHANGE any colors
+				-- TODO make sure the reduceColorsOctree() algorithm REPLACE and doesn't CHANGE any colors
 				-- right now that's what it does.
 				-- otherwise this will get out of sync with our pic's overall 256 colors
-				tile.img, tile.hist = reduceColors(tile.img, 16, tile.hist)
+				tile.img, tile.hist = reduceColorsOctree{img=tile.img, targetSize=16, hist=tile.hist}
 			end
 		end
 	end
@@ -620,13 +622,10 @@ elseif option == 'C' then
 -- option D - same as option A but with a linear search for merging colors
 elseif option == 'D' then
 	
-	local reduceColorsLinear = require 'reducecolorslinear'
-	local buildHistogramQuantizationTransferMap = require 'buildhistqxfermap'
-
 print'reducing each tile to 15 colors...'
 	local targetPaletteSize = 15
 	for _,tile in pairs(tiles) do
-		tile.img, tile.hist = reduceColorsLinear(tile.img, targetPaletteSize, tile.hist)
+		tile.img, tile.hist = reduceColorsLinear{img=tile.img, targetSize=targetPaletteSize, hist=tile.hist}
 	end
 	rebuildTiles(tiles, ts, tw, th):save(basefilename..'-quant16linear.png')
 	
@@ -678,8 +677,163 @@ print'reducing all palettes to only 16...'
 -- new idea.  1) downsample the pic so 1 pixel = 1 tile, then quantize this pic to 16 colors, then create a map from downsampled colors to tiles, then combine each of these into 1 pic, quantize them each to 15 colors, viola
 elseif option == 'E' then
 
+	print'sizing down image...'
+	--[[
 	local img1pixpertile = img:resize(img.width / ts, img.height / ts)
+	--]]	
+	-- [[ need to remove the black tiles
+	local img1pixpertile = Image(ts*#table.keys(tiles), ts, 3, 'unsigned char')
+	local img1pixelIndexToXY = table()
+	for y=0,th-1 do
+		for x=0,tw-1 do
+			local tileIndex = 1 + x + tw * y
+			local tile = tiles[tileIndex]
+			if tile then
+				img1pixpertile:pasteInto{
+					x = #img1pixelIndexToXY * ts,
+					y = 0,
+					image = tile.img,
+				}
+				img1pixelIndexToXY:insert{x,y}
+			end
+		end
+	end
+	-- downsample
+	img1pixpertile = img1pixpertile:resize(img1pixpertile.width / ts, img1pixpertile.height / ts)
+-- [[ even with linear search of closest downsampled colors per tile (which takes 12 mins), i'm still getting a lot of clustering together of darker tiles, whether they are predominantly green, red, pink, etc
+-- so instead, how about here we look at only hue? or only hue and saturation (i.e. just normalize the color vector)
+	do
+		local p = img1pixpertile.buffer
+		for i=0,img1pixpertile.width-1 do
+			p[0], p[1], p[2] = (vec3d(p[0], p[1], p[2]):normalize() * 255):map(math.floor):unpack()
+			p = p + 3
+		end
+	end
+--]]
+	if img1pixpertile.width ~= #img1pixelIndexToXY then
+		error("expected img1pixpertile.width=="..img1pixpertile.width.." to equal #img1pixelIndexToXY=="..#img1pixelIndexToXY)
+	end
+	assert(img1pixpertile.width == #table.keys(tiles))
+	assert(img1pixpertile.height == 1)
+	--]]
+	print'quantizing to 16 colors...'
+	local hist
 
+	local function progress(percent, s, numColors)
+		print(('%d%%'):format(100*percent), s..'s', 'numColors='..numColors)
+	end
+
+	local img1pixpertilefilename = 'img1pixpertilefilename-cache.png'
+	if os.fileexists(img1pixpertilefilename) then
+		img1pixpertile = Image(img1pixpertilefilename)
+		hist = buildHistogram(img1pixpertile)
+	else
+		-- [[ linear goes slow for this sized pic, cuz it is O(n^2) ... takes 12 mins for reducing 1200 colors
+		img1pixpertile, hist = reduceColorsLinear{
+			img = img1pixpertile,
+			targetSize = 16,	-- 16 unique palettes
+			progress = progress,
+		}
+		--]]
+		--[[ octree seems to group all the tiles up to the first entry ... hmm, why is this ...
+		-- TODO instead of merging octree leafs (which gives ugly performance), do a legit nearest search, start with the deepest and closest nodes, prune nodes too far away, and also re-insert the weighted merged point instead of just replacing points 
+		-- then this would have better performance but same results as the linear search
+		img1pixpertile, hist = reduceColorsOctree{img=img1pixpertile, targetSize=16}	-- 16 unique palettes
+		--]]
+		img1pixpertile:save(img1pixpertilefilename)
+	end
+	-- now for each unique color, make a list of all tiles, put them into the same image, and quantize that image
+	local colors = table.keys(hist):sort()
+	print'palette:'
+	for _,color in ipairs(colors) do
+		print('',vec3ub(int24to8x8x8(color)))
+	end
+	local indexForColor = colors:mapi(function(key,i) return i-1,key end)	-- map from 24-bit color to 0-based index
+	print'grouping tiles by downsampled image unique 16-color quantization...' 
+	local tilesForColor = range(16):mapi(function() return table() end)
+	local p = img1pixpertile.buffer
+	for i,xy in ipairs(img1pixelIndexToXY) do
+		local x,y = table.unpack(img1pixelIndexToXY[i])
+		local color = int8x8x8to24(p[0], p[1], p[2])
+		local index = indexForColor[color]
+		local tiles = tilesForColor[index+1]
+		if not index or not tiles then
+			error("couldn't find index for color "..vec3ub(int24to8x8x8(color)))
+		end
+		tiles:insert{
+			x = x,
+			y = y,
+			img = img:copy{x=x*ts, y=y*ts, width=ts, height=ts},
+		}
+		p = p + 3
+	end
+
+	-- taken from super-metroid-randomizer/sm-graphics.lua
+	local function graphicsWrapRows(
+		srcImg,
+		tileHeight,
+		numDstTileCols
+	)
+		local channels = srcImg.channels
+		local tileWidth = srcImg.width
+		local numSrcTileRows = math.ceil(srcImg.height / tileHeight)
+		local numDstTileRows = math.ceil(numSrcTileRows / numDstTileCols)
+		local sizeofChannels = channels * ffi.sizeof(srcImg.format)
+		local dstImg = Image(
+			tileWidth * numDstTileCols,
+			tileHeight * numDstTileRows,
+			channels,
+			srcImg.format)
+		dstImg:clear()
+		for j=0,numDstTileRows-1 do
+			for i=0,numDstTileCols-1 do
+				for k=0,tileHeight-1 do
+					local srcY = k
+						+ i * tileHeight
+						+ j * tileHeight * numDstTileCols
+					if srcY < srcImg.height then
+						local dstX = tileWidth * i
+						local dstY = k + tileHeight * j
+						ffi.copy(
+							dstImg.buffer + channels * (dstX + dstImg.width * dstY),
+							srcImg.buffer + channels * (srcImg.width * srcY),
+							sizeofChannels * tileWidth)
+					end
+				end
+			end
+		end
+		return dstImg
+	end
+
+	local numTiles = tilesForColor:mapi(function(tiles) return #tiles end):sum()
+	print('we have a total of '..numTiles..' tiles')
+	local newimg = img:clone():clear()
+	for j,tiles in ipairs(tilesForColor) do
+print('high-nibble '..(j-1)..' has '..#tiles..' tiles')
+		local timg = Image(ts, #tiles * ts, 3, 'unsigned char')
+		for i,tile in ipairs(tiles) do
+			timg:pasteInto{image=tile.img, x=0, y=(i-1)*ts}
+		end
+		if #tiles > 0 then
+			local wrapped = graphicsWrapRows(timg, ts, 16)
+			wrapped:save('color '..(j-1)..' tiles.png')
+		end
+		-- now quantize each img-per-regionmap palette into 15 colors
+		--local qimg = reduceColorsLinear{img=timg, targetSize=15, progress=progress}	-- if 1200 -> 16 points above took 12 mins, this is 3000 points .. soo  .... much longer 
+		local qimg = reduceColorsOctree{img=timg, targetSize=15}	-- ugly, as octree search is ugly atm. TODO fixme, do a real search (not approximate) and real merge (re-insert, don't just remove/replace points), use octree for pruning
+		if #tiles > 0 then
+			local wrapped = graphicsWrapRows(qimg, ts, 16)
+			wrapped:save('quant15 color '..(j-1)..' tiles.png')
+		end
+		-- now that the imgs have been quantized as well, paste everything back together
+		for i,tile in ipairs(tiles) do
+			assert((i-1)*ts < qimg.height)
+			newimg:pasteInto{x=tile.x*ts, y=tile.y*ts, image=qimg:copy{x=0, y=(i-1)*ts, width=ts, height=ts}}
+		end
+	end
+	newimg:save(basefilename..'-16tiles-16colors-dsqa.png')	-- dsqa = "downsample quanization association of tiles"
+
+	print'done'
 else
 	error'here'
 end
