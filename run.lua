@@ -2,15 +2,22 @@
 local ffi = require 'ffi'
 local bit = require 'bit'
 local os = require 'ext.os'
+local class = require 'ext.class'
 local table = require 'ext.table'
 local range = require 'ext.range'
+local math = require 'ext.math'
 local tolua = require 'ext.tolua'
 local vector = require 'ffi.cpp.vector'
+local vec3ub = require 'vec-ffi.vec3ub'
+local vec3d = require 'vec-ffi.vec3d'
 local Image = require 'image'
 
-local quantize = require 'quantize'.quantize
-local buildHistogram = require 'quantize'.buildHistogram
-local reduceColors = require 'quantize'.reduceColors
+local buildHistogram = require 'buildhistogram'
+local quantize = require 'quantize'
+local reduceColors = require 'reducecolors'
+
+local int24to8x8x8 = require 'int24to8x8x8'
+local int8x8x8to24 = require 'int8x8x8to24'
 
 local filename = ... or 'map-tex-small-brighter.png'
 local img = Image(filename)
@@ -66,10 +73,15 @@ end
 local ts = 8
 local tiles, tw, th = splitImageIntoTiles(img, ts)
 
-local option = 'A'
+--local option = 'A'
 --local option = 'B'
+--local option = 'C'
+local option = 'D'
 
-if option == 'A' then -- option A: chop the pic into tiles, quantize each tile to 16 colors, then somehow merge tile palettes and further quantize to get 16 sets of 16 colors
+
+-- option A: chop the pic into tiles, quantize each tile to 16 colors, then somehow merge tile palettes and further quantize to get 16 sets of 16 colors
+if option == 'A' then 
+
 
 	-- quantize each tile into a 16-color palette
 	-- reduce to 15 colors so we always have 1 transparent color per palette
@@ -80,10 +92,7 @@ if option == 'A' then -- option A: chop the pic into tiles, quantize each tile t
 
 	local function histToPal(hist)
 		return table.keys(hist):sort():mapi(function(key)
-			local r = bit.band(0xff, key)
-			local g = bit.band(0xff, bit.rshift(key, 8))
-			local b = bit.band(0xff, bit.rshift(key, 16))
-			return string.char(r)..string.char(g)..string.char(b)
+			return string.char(int24to8x8x8(key))
 		end):sort():concat()
 	end
 
@@ -303,8 +312,6 @@ assert(numbytes == 6)
 				-- fromtocolorsPerPal[frompalstr][topalstr] = { [fromcolor] = tocolor } where fromcolor and tocolor are 24-bit integers
 				local fromtocolorsPerPal = {}
 		
-				local vec3ub = require 'vec-ffi.vec3ub'
-				local vec3d = require 'vec-ffi.vec3d'
 				-- reassign palettes
 				--for topal,tiles in pairs(tilesForPal) do
 				for _,tile in pairs(tiles) do
@@ -330,10 +337,7 @@ print('from hist', bintohex(histToPal(tile.hist)))
 							fromtocolorsPerPal[frompal][topal] = fromto
 							for w in frompal:gmatch'...' do
 								local fromc = vec3ub(w:byte(1,3))
-								local fromcolorint = bit.bor(
-									fromc.x,
-									bit.lshift(fromc.y, 8),
-									bit.lshift(fromc.z, 16))
+								local fromcolorint = int8x8x8to24(fromc:unpack())
 								local bestDist
 								local bestc
 								for _,c in ipairs(toc) do
@@ -343,26 +347,20 @@ print('from hist', bintohex(histToPal(tile.hist)))
 										bestc = c
 									end
 								end
-								local tocolorint = bit.bor(
-									bestc.x,
-									bit.lshift(bestc.y, 8),
-									bit.lshift(bestc.z, 16)
-								)
+								local tocolorint = int8x8x8to24(bestc:unpack())
 print("adding entry from "..("%06x"):format(fromcolorint).." to "..('%06x'):format(tocolorint))
 								fromto[fromcolorint] = tocolorint
 							end
 						end
 						for i=0,tile.img.width*tile.img.height-1 do
 							local p = tile.img.buffer + 3 * i
-							local fromcolorint = bit.bor(p[0], bit.lshift(p[1], 8), bit.lshift(p[2], 16))
+							local fromcolorint = int8x8x8to24(p[0], p[1], p[2])
 							local tocolorint = fromto[fromcolorint]
 							if not tocolorint then
 								error("found a color not in the palette (that's why I should index the images) "
 									..('%06x'):format(fromcolorint))
 							end
-							p[0] = bit.band(0xff, tocolorint)
-							p[1] = bit.band(0xff, bit.rshift(tocolorint, 8))
-							p[2] = bit.band(0xff, bit.rshift(tocolorint, 16))
+							p[0], p[1], p[2] = int24to8x8x8(tocolorint)
 						end
 					
 						tile.pal = topal
@@ -389,9 +387,10 @@ print("adding entry from "..("%06x"):format(fromcolorint).." to "..('%06x'):form
 	-- first reduce each tile to only use 16 colors
 
 
+-- option B: just quantize the whole picture into 256 colors:
 elseif option == 'B' then
 
--- option B: just quantize the whole picture into 256 colors:
+
 	local imageQuant256Filename = basefilename..'-256color.png'
 	local imageQuant256, hist
 	if not os.fileexists(imageQuant256Filename) then
@@ -429,14 +428,205 @@ elseif option == 'B' then
 	-- and then 
 
 
+-- option C - reduce an error function using a genetic algorithm
+elseif option == 'C' then
+	
+
+	local tiles, tw, th = splitImageIntoTiles(img, ts)
+	for _,tile in pairs(tiles) do
+		tile.colors = table.keys(tile.hist):sort()
+		tile.indexForColors = tile.colors:mapi(function(color,i) return i, color end)	-- 1-based index for each color, lookup into tile.colors
+		assert(#tile.colors < 256)	-- i'm storing colors per tile as indexes, then mapping them to a low nibble using the tileColorMaps
+	end
+
+	-- low-nibble indexed version
+	local indexedTiles = table.map(tiles, function(tile)
+		return {
+			img = tile.img:setChannels(1):clear()
+		}
+	end)
+
+	for ty=0,th-1 do
+		for tx=0,tw-1 do
+			local tileIndex = 1 + tx + tw * ty
+			local tile = tiles[tileIndex]
+			if tile then
+				local indexedImg = assert(indexedTiles[tileIndex]).img
+				local src = tile.img.buffer
+				local dst = indexedImg.buffer
+				for ofs=0,ts*ts-1 do
+					local srccolor = int8x8x8to24(src[0], src[1], src[2])
+					dst[0] = assert(tile.indexForColors[srccolor])-1
+					src = src + 3
+					dst = dst + 1
+				end
+			end
+		end
+	end
+
+	-- temporary destination rgb
+	local tmptiles = table.map(tiles, function(tile) 
+		return {
+			img = tile.img:clone(),
+		}
+	end)
+
+	local changeChance = .2
+
+	local uid = 1
+	
+	local Unit = class()
+	function Unit:init(src)
+		self.uid = uid
+		uid = uid + 1
+		self.palette = ffi.new('uint8_t[?]', 3*256)
+		self.tileHiMap = ffi.new('uint8_t[?]', tw*th)	-- per-tile of the high-nibble
+		self.tileColorMaps = table.map(tiles, function(tile, tileIndex)
+			return ffi.new('uint8_t[?]', #tile.colors, tileIndex)
+		end)
+		if src then
+			ffi.copy(self.palette, src.palette, ffi.sizeof(self.palette))
+			ffi.copy(self.tileHiMap, src.tileHiMap, ffi.sizeof(self.tileHiMap))
+			for tileIndex,tileColorMap in pairs(self.tileColorMaps) do
+				ffi.copy(tileColorMap, src.tileColorMaps[tileIndex], ffi.sizeof(tileColorMap))
+			end
+			
+			-- and now permute each one by a bit
+			
+			-- skip 0,16, etc (they are transparent)
+			for i=0,15 do
+				for j=1,15 do
+					if math.random() < changeChance then
+						self.palette[0 + 3 * (j + 16 * i)] = math.clamp(self.palette[0 + 3 * (j + 16 * i)] + math.random(-15,15), 0, 255)
+					end
+					if math.random() < changeChance then
+						self.palette[1 + 3 * (j + 16 * i)] = math.clamp(self.palette[1 + 3 * (j + 16 * i)] + math.random(-15,15), 0, 255)
+					end
+					if math.random() < changeChance then
+						self.palette[2 + 3 * (j + 16 * i)] = math.clamp(self.palette[2 + 3 * (j + 16 * i)] + math.random(-15,15), 0, 255)
+					end
+				end
+			end
+
+			for i=0,tw*th-1 do
+				if math.random() < changeChance then
+					self.tileHiMap[i] = math.clamp(self.tileHiMap[i] + math.random(-3, 3), 0, 15)
+				end
+			end
+			for tileIndex,tileColorMap in pairs(self.tileColorMaps) do
+				for i=0,ffi.sizeof(tileColorMap)-1 do	-- == #tiles[tileIndex].colors-1
+					if math.random() < changeChance then
+						tileColorMap[i] = math.clamp(tileColorMap[i] + math.random(-3, 3), 0, 15)
+					end
+				end
+			end
+	
+		else
+			-- skip 0,16, etc (they are transparent)
+			for i=0,15 do
+				self.palette[0 + 16*i] = 0
+				self.palette[1 + 16*i] = 0
+				self.palette[2 + 16*i] = 0
+				for j=1,15 do
+					self.palette[0 + 3 * (j + 16 * i)] = math.random(0,255)
+					self.palette[1 + 3 * (j + 16 * i)] = math.random(0,255)
+					self.palette[2 + 3 * (j + 16 * i)] = math.random(0,255)
+				end
+			end
+
+			for i=0,tw*th-1 do
+				self.tileHiMap[i] = math.random(0,15)
+			end
+			for tileIndex,tileColorMap in pairs(self.tileColorMaps) do
+				for i=0,ffi.sizeof(tileColorMap)-1 do	-- == #tiles[tileIndex].colors-1
+					tileColorMap[i] = math.random(0,15)
+				end
+			end
+		end
+	end
+	function Unit:calcFitness()
+		if self.fitness then return self.fitness end
+		local err = 0
+		for ty=0,th-1 do
+			for tx=0,tw-1 do
+				local tileIndex = 1 + tx + tw * ty
+				local tile = tiles[tileIndex]
+				if tile then
+					local tileColorMap = assert(self.tileColorMaps[tileIndex])
+					local src = indexedTiles[tileIndex].img.buffer
+					local dst = tmptiles[tileIndex].img.buffer
+					local cmp = tile.img.buffer
+					for ofs=0,ts*ts-1 do
+						local colorindexintile = src[0]									-- should be within 0 to #tile.colors-1
+						if colorindexintile < 0 or colorindexintile >= ffi.sizeof(tileColorMap) then
+							error("got an oob indexed tile value: "..colorindexintile.." for tileColorMap size "..ffi.sizeof(tileColorMap).." and #tile.colors "..#tile.colors)
+						end
+						local colorindexlo = assert(tileColorMap[colorindexintile])			-- should be within 0 to 15
+						local colorindexhi = assert(self.tileHiMap[tileIndex])			-- TODO you can sparely store tileHiMap next to tileColorMap
+						local colorindex = bit.bor(bit.lshift(colorindexhi, 4), colorindexlo)	-- should be 0-255.  TODO store the hi bit shifted
+						local color = self.palette + 3 * colorindex
+						dst[0] = color[0]
+						dst[1] = color[1]
+						dst[2] = color[2]
+						local dx = tonumber(dst[0]) - tonumber(cmp[0])
+						local dy = tonumber(dst[1]) - tonumber(cmp[1])
+						local dz = tonumber(dst[2]) - tonumber(cmp[2])
+						err = err + .5 * (dx * dx + dy * dy + dz * dz)
+						src = src + 1
+						dst = dst + 3
+						cmp = cmp + 3
+					end
+				end
+			end
+		end
+		self.fitness = err
+		return err
+	end
+
+	local percentToReproduce = .2
+	local populationSize = 400
+	local maxGenerations = math.huge
+	local units = range(populationSize):mapi(function()
+		local unit = Unit()
+		unit:calcFitness()
+		return unit
+	end)
+
+	local oldbest
+	for generation=1,maxGenerations do
+--print('gen '..generation)
+		
+		units:sort(function(a,b) return a.fitness < b.fitness end)
+		local best = units[1]
+		if best ~= oldbest then
+			oldbest = best
+			print(best.uid, best.fitness)
+			-- force copy into tmptiles
+			best.fitness = nil
+			best:calcFitness()
+			rebuildTiles(tmptiles, ts, tw, th):save('ga/'..best.uid..'.png')
+		end
+
+		for i=#units,populationSize+1,-1 do
+			units[i] = nil
+		end
+
+		for i=1,math.ceil(populationSize*percentToReproduce) do
+			local srcUnit = units[math.random(#units)]
+			local newUnit = Unit(srcUnit)
+			newUnit:calcFitness()
+			units:insert(newUnit)
+		end
+	end
+
+-- option D - same as option A but with a linear search for merging colors
+elseif option == 'D' then
+	local reduceColorsLinear = require 'reducecolorslinear'
+	local targetPaletteSize = 15
+	for _,tile in pairs(tiles) do
+		tile.img, tile.hist = reduceColorsLinear(tile.img, targetPaletteSize, tile.hist)
+	end
+	rebuildTiles(tiles, ts, tw, th):save(basefilename..'-quant16linear.png')
 else
---[[ option C - reduce the 16 colors for 16 tiles at once?
-minimize c_ij (i'th color of j'th palette)
-such that pixels in t_k are only in one single palette p_m = {c_mj}
-
-soo ... hopfield network?
---]]
-
-
 	error'here'
 end
