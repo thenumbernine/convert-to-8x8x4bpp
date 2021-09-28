@@ -1,169 +1,66 @@
+--[[
+TODO replace 24-bit integer keys with 3-byte string keys
+and then replace vec3ub with the strings
+and vec3d with vector'double'
+and then generalize by dimension
+--]]
 local table = require 'ext.table'
-local vec3ub = require 'vec-ffi.vec3ub'
-local vec3d = require 'vec-ffi.vec3d'
-local int8x8x8to24 = require 'int8x8x8to24'
-local int24to8x8x8 = require 'int24to8x8x8'
-
-local function reduceColorsLinear(img, targetSize, hist)
-	hist = hist and table(hist):setmetatable(nil) or buildHistogram(img)
-	local colors = table.keys(hist):sort(function(a,b)
-		return hist[a] < hist[b]
-	end)
---print('colors: #'..#colors)
---print(colors:mapi(function(c) return ' '..vec3ub(int24to8x8x8(c)) end):concat'\n')
-	local distSqs = colors:mapi(function(ci,i)
-		ci = vec3ub(int24to8x8x8(ci))
-		return colors:mapi(function(cj,j)
-			cj = vec3ub(int24to8x8x8(cj))
-			return i == j and 0 or (vec3d(ci:unpack()) - vec3d(cj:unpack())):lenSq()
-		end)
-	end)
 	
-	local pairsForDists = table()
-	for i=1,#distSqs-1 do
-		for j=i+1,#distSqs do
-			pairsForDists:insert{i,j,distSqs[i][j]}	-- i < j
-		end
+local buildHistogramQuantizationTransferMap = require 'buildhistqxfermap'
+local applyHistogramQuantizationTransferMap = require 'applyhistqxfermap'
+
+-- size = how many bytes to use
+local function inttobin(i, size)
+	local s = ''
+	for j=1,size do
+		s = s .. string.char(bit.band(0xff, i))
+		i = bit.rshift(i, 8)
 	end
+	return s
+end
 
-	-- remapping colors
-	local fromto = {}
-	for _,c in ipairs(colors) do
-		fromto[c] = c
+local function bintoint(s)
+	local i = 0
+	for j=#s,1,-1 do
+		i = bit.bor(bit.lshift(i, 8), s:byte(j,j))
 	end
-	
-	while #colors > targetSize do
-		pairsForDists:sort(function(a,b) return a[3] > b[3] end)
-	
-		-- now merge closest pairs, lerp by weights of each
-		local i, j = table.unpack(pairsForDists:remove())
-		local ci = colors[i]
-		if not ci then
-			error("pairsForDists had "..i.." but there is no color")
-		end
-		local cj = colors[j]
-		if not cj then
-			error("pairsForDists had "..j.." but there is no color")
-		end
---print('combining '..vec3ub(int24to8x8x8(ci))..' and '..vec3ub(int24to8x8x8(cj)))
-		local wi = hist[ci]
-		if not wi then
-			error("couldn't find weight for color key "..('%06x'):format(ci))
-		end
-		local wj = assert(hist[cj])
-		if not wj then
-			error("couldn't find weight for color key "..('%06x'):format(cj))
-		end
-		hist[ci] = nil
-		hist[cj] = nil
+	return i
+end
 
---print('and clearing their hist weights, hist keys are now: #'..#table.keys(hist))
---print(table.keys(hist):mapi(function(c) return ' '..vec3ub(int24to8x8x8(c)) end):concat'\n')
-		local wk = wi + wj
-		local vi = vec3d(int24to8x8x8(ci))
-		local vj = vec3d(int24to8x8x8(cj))
-		local vk = vi * (wi / wk) + vj * (wj / wk)
-		local ck = int8x8x8to24(
-			math.floor(vk.x),
-			math.floor(vk.y),
-			math.floor(vk.z))
-		--print('adding new color key '..('%06x'):format(ck)..' weight '..wk)
-	
-		-- if there was an old entry mappig into ci or cj then now it should map into ck
-		for _,from in ipairs(table.keys(fromto)) do
-			local to = fromto[from]
-			if to == ci or to == cj then
-				fromto[from] = ck
-			end
-		end
-		fromto[ci] = ck
-		fromto[cj] = ck
+-- size = how many bytes to use
+local function replaceIntKeysWithStrs(t, size)
+	return table.map(t, function(v,k)
+		if type(k) == 'number' then k = inttobin(k, size) end
+		return v,k
+	end):setmetatable(nil)
+end
 
-		local dontAdd
-		if hist[ck] then
-			-- if there is hist[ck] here then *DONT* add to colors and *DO* just inc the hist weight
-			hist[ck] = hist[ck] + wk
-			dontAdd = true
-		else
-			hist[ck] = wk
-			colors:insert(ck)
-		end
-		colors:remove(j)	-- remove larger of the two first
-		colors:remove(i)
-	
-		-- remove distSqs for i and j ...
-		for _,row in ipairs(distSqs) do
-			row:remove(j)
-			row:remove(i)
-		end
-		distSqs:remove(j)
-		distSqs:remove(i)
-	
-		-- remove old pairs that included these colors
-		for m=#pairsForDists,1,-1 do
-			local p = pairsForDists[m]
-			if p[1] == i or p[2] == i
-			or p[1] == j or p[2] == j then
-				pairsForDists:remove(m)
-			end
-		end
-		-- decrement existing pairs indexes
-		for _,p in ipairs(pairsForDists) do
-			for m=1,2 do
-				if p[m] > j then 
-					p[m] = p[m] - 2 
-				elseif p[m] > i then
-					p[m] = p[m] - 1
-				end
-			end
-		end
+local function replaceStrKeysWithInts(t)
+	return table.map(t, function(v,k)
+		if type(k) == 'string' then k = bintoint(k) end
+		return v,k
+	end):setmetatable(nil)
+end
 
-		if dontAdd then
-			local k = assert(colors:find(ck))	-- hist[ck] exists, so colors[k] == ck should exist too
-			local vk = vec3ub(int24to8x8x8(ck))
-			for i=1,#colors do
-				local ci = colors[i]
-				local vi = vec3ub(int24to8x8x8(ci))
-				local distSq = i == k and 0 or (vec3d(vi:unpack()) - vec3d(vk:unpack())):lenSq()
-				distSqs[i][k] = distSq
-				distSqs[k][i] = distSq
-			end
-			for _,p in ipairs(pairsForDists) do
-				if p[1] == k or p[2] == k then
-					p[3] = distSqs[p[1]][p[2]]
-				end
-			end
-		else
-			-- add new entries for distSqs[*][k] and pairsForDists
-			local k = #colors
-			local vk = vec3ub(int24to8x8x8(ck))
---print('made new color '..vk..' .. # colors '..#colors)
-			distSqs[k] = table()
-			for i=1,#colors-1 do
-				local ci = colors[i]
-				local vi = vec3ub(int24to8x8x8(ci))
-				assert(distSqs[i][k] == nil)
-				local distSq = (vec3d(vi:unpack()) - vec3d(vk:unpack())):lenSq()
-				distSqs[i][k] = distSq
-				distSqs[k][i] = distSq
-				pairsForDists:insert{i,k,distSq}
-			end
-			distSqs[k][k] = 0
-		end
-	end
---print'done'
-	local newimg = img:clone()
-	local p = newimg.buffer
-	for i=0,newimg.width*newimg.height-1 do
-		local key = int8x8x8to24(p[0], p[1], p[2])
-		local dstkey = fromto[key]
-		if not dstkey then
-			error("no fromto for color "..vec3ub(p[0], p[1], p[2]))
-		end
-		p[0], p[1], p[2] = int24to8x8x8(dstkey)
-		p = p + 3
-	end
-	return newimg, hist
+
+
+local function reduceColorsLinear(img, targetPaletteSize, hist)
+
+	hist = replaceIntKeysWithStrs(hist, 3)
+	
+	local fromto
+	hist, fromto = buildHistogramQuantizationTransferMap{
+		hist = hist,
+		targetSize = targetPaletteSize,
+		dist = require 'bindistsq',
+		merge = require 'binweightedmerge',
+	}
+	
+	img = applyHistogramQuantizationTransferMap(img, fromto)
+	
+	hist = replaceStrKeysWithInts(hist)
+
+	return img, hist
 end
 
 return reduceColorsLinear

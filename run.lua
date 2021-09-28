@@ -15,7 +15,7 @@ local Image = require 'image'
 local buildHistogram = require 'buildhistogram'
 local quantize = require 'quantize'
 local reduceColors = require 'reducecolors'
-
+local bintohex = require 'bintohex'
 local int24to8x8x8 = require 'int24to8x8x8'
 local int8x8x8to24 = require 'int8x8x8to24'
 
@@ -77,6 +77,7 @@ local tiles, tw, th = splitImageIntoTiles(img, ts)
 --local option = 'B'
 --local option = 'C'
 local option = 'D'
+--local option = 'E'
 
 
 -- option A: chop the pic into tiles, quantize each tile to 16 colors, then somehow merge tile palettes and further quantize to get 16 sets of 16 colors
@@ -119,10 +120,7 @@ if option == 'A' then
 		return a < b
 	end
 
-	local function bintohex(s)
-		return (s:gsub('.', function(c) return ('%02x'):format(c:byte()) end))
-	end
-	
+
 --	print("palettes before merges:")
 --	print(allPalettes:mapi(bintohex):concat'\n')
 	
@@ -621,12 +619,67 @@ elseif option == 'C' then
 
 -- option D - same as option A but with a linear search for merging colors
 elseif option == 'D' then
+	
 	local reduceColorsLinear = require 'reducecolorslinear'
+	local buildHistogramQuantizationTransferMap = require 'buildhistqxfermap'
+
+print'reducing each tile to 15 colors...'
 	local targetPaletteSize = 15
 	for _,tile in pairs(tiles) do
 		tile.img, tile.hist = reduceColorsLinear(tile.img, targetPaletteSize, tile.hist)
 	end
 	rebuildTiles(tiles, ts, tw, th):save(basefilename..'-quant16linear.png')
+	
+	-- ok now quantize all the tile's palettes into 16 unique palettes
+	do
+
+print'creating palette histogram...'
+		local palhist = {}
+		for _,tile in pairs(tiles) do
+			local histkeys = table.keys(tile.hist)
+			
+			--[[
+			make all palettes equal size, for the quantizer
+			TODO don't do this, instead allow for 
+			 (1) dist calcs of varying-sized palettes (by closest-subsets)
+			 (2) upon merging palettes...
+			so for each palette pair, I should find the best match between palette entries ... time to abstract some histogram quantization operations ...
+			--]]
+			while #histkeys < 15 do histkeys:insert(1, 0) end
+			
+			local pal = histkeys:sort():mapi(function(c)
+				local r,g,b = int24to8x8x8(c)
+				return string.char(r,g,b)
+			end):concat()
+			tile.pal = pal
+			palhist[pal] = (palhist[pal] or 0) + 1
+		end
+		for _,pal in ipairs(table.keys(palhist):sort()) do
+			print(palhist[pal], bintohex(pal))
+		end
+
+print'reducing all palettes to only 16...'
+		local fromto
+		palhist, fromto = buildHistogramQuantizationTransferMap{
+			hist = palhist,
+			targetSize = 16,
+			-- TODO replace with a more flexible distance
+			-- also TODO abstract the distance return (object) and conversion to number so I can cache the coherency between palette pairs
+			dist = require 'bindistsq',	
+			merge = require 'binweightedmerge',
+		}
+		for _,tile in pairs(tiles) do
+			local newpal = fromto[tile.pal]
+			assert(newpal)
+			-- now here, remap colors from til
+		end
+	end
+
+-- new idea.  1) downsample the pic so 1 pixel = 1 tile, then quantize this pic to 16 colors, then create a map from downsampled colors to tiles, then combine each of these into 1 pic, quantize them each to 15 colors, viola
+elseif option == 'E' then
+
+	local img1pixpertile = img:resize(img.width / ts, img.height / ts)
+
 else
 	error'here'
 end
