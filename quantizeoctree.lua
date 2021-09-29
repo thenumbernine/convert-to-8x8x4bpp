@@ -2,6 +2,7 @@ local ffi = require 'ffi'
 local vector = require 'ffi.cpp.vector'
 local class = require 'ext.class'
 local table = require 'ext.table'
+local range = require 'ext.range'
 
 
 local Node = class()
@@ -39,6 +40,32 @@ function Node:getChildForIndex(k)
 	return ch
 end
 
+--[[
+assumes pt has a member named 'pos' which is a vector'double'
+--]]
+function Node:getChildIndex(pt)
+	local k = range(self.childKeySizeInBytes):mapi(function() return 0 end)
+	for i=0,self.dim-1 do
+		local byteindex = bit.rshift(i, 3)
+		local bitindex = bit.band(i, 7)
+		if pt.pos.v[i] >= self.mid.v[i] then
+			k[byteindex+1] = bit.bor(k[byteindex+1], bit.lshift(1, bitindex))
+		end
+	end
+	return k:mapi(function(ch) return string.char(ch) end):concat()
+end
+	
+--[[
+childIndex in 0..2^dim-1
+b in 0..dim-1
+--]]
+function Node:childIndexHasBit(childIndexKey, i)
+	local byteindex = bit.rshift(i, 3)
+	local bitindex = bit.band(i, 7)
+	local bytevalue = childIndexKey:byte(byteindex+1, byteindex+1)
+	return bit.band(bytevalue, bit.lshift(1,bitindex)) ~= 0
+end
+
 function Node:addToTree(pt)
 	if self.chs then
 		assert(not self.pts)
@@ -49,6 +76,7 @@ function Node:addToTree(pt)
 		if #self.pts > self.splitSize then	-- split
 -- NOTICE I CAN'T HANDLE MULTIPLE IDENTICAL POINTS
 -- how to fix this ... 
+-- TODO assert pt has 'weight' as well, and for identical points, combine 'weight' values?			
 			-- create upon request
 			self.chs = {}
 			local pts = self.pts
@@ -95,7 +123,7 @@ function Node:countbranches()
 	return n
 end
 
-local function quantize(args)
+local function quantizeOctree(args)
 	local dim = assert(args.dim)
 	local targetSize = assert(args.targetSize)
 
@@ -103,14 +131,11 @@ local function quantize(args)
 	nodeClass.dim = dim
 	nodeClass.splitSize = assert(args.splitSize)
 
-	-- returns a value that can be uniquely mapped from 0..2^dim-1
-	nodeClass.getChildIndex = assert(args.nodeGetChildIndex)
-	
-	--[[
-	childIndex in 0..2^dim-1
-	b in 0..dim-1
-	--]]
-	nodeClass.childIndexHasBit = assert(args.nodeChildIndexHasBit)
+
+	nodeClass.childKeySizeInBytes = bit.rshift(dim, 3)
+	if bit.band(dim, 7) ~= 0 then
+		nodeClass.childKeySizeInBytes = nodeClass.childKeySizeInBytes + 1 
+	end
 
 	local root = nodeClass{
 		depth = 0,
@@ -153,8 +178,8 @@ local function quantize(args)
 			n = root:countleaves()
 		end
 	end
-		
-	args.done(root)
+	
+	return root
 end
 
-return quantize
+return quantizeOctree

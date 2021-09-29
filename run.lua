@@ -226,7 +226,7 @@ print('pal', bintohex(tile.pal))
 	do
 		local targetNumPalettes = 16
 		local dim = 3*targetPaletteSize
-		quantizeOctree{
+		local root = quantizeOctree{
 			dim = dim,
 			targetSize = targetNumPalettes,
 			minv = 0,
@@ -243,134 +243,107 @@ print('pal', bintohex(tile.pal))
 					assert(#keys <= targetPaletteSize)
 					
 					local pal = vector('double', dim)
+					local p = pal.v
 					for i,key in ipairs(keys) do
-						pal.v[0 + 3 * (i-1)] = key:byte(1,1)
-						pal.v[1 + 3 * (i-1)] = key:byte(2,2)
-						pal.v[2 + 3 * (i-1)] = key:byte(3,3)
+						p[0], p[1], p[2] = key:byte(1,3)
+						p = p + 3
 					end
 					root:addToTree{
 						palstr = palstr,
-						pal = pal,
+						pos = pal,
 					}
 				end
 			end,
-			nodeGetChildIndex = function(node, pt)
-				-- 48-bit vector ...
-				--				pt.pos.v[0] >= node.mid.v[0] and 1 or 0,
-				--				pt.pos.v[1] >= node.mid.v[1] and 2 or 0,
-				--				pt.pos.v[2] >= node.mid.v[2] and 4 or 0)		
-				-- but just convert 6 uint8's into chars and concat them
-				local numbytes = bit.rshift(dim, 3)
-				if bit.band(dim, 7) ~= 0 then numbytes = numbytes + 1 end
-assert(numbytes == 6)			
-				local k = range(numbytes):mapi(function() return 0 end)
-				for i=0,dim-1 do
-					local byteindex = bit.rshift(i, 3)
-					local bitindex = bit.band(i, 7)
-					if pt.pal.v[i] >= node.mid.v[i] then
-						k[byteindex+1] = bit.bor(k[byteindex+1], bit.lshift(1, bitindex))
-					end
-				end
-				return k:mapi(function(ch) return string.char(ch) end):concat()
-			end,
-			nodeChildIndexHasBit = function(node, childIndexKey, i)
-				local byteindex = bit.rshift(i, 3)
-				local bitindex = bit.band(i, 7)
-				local bytevalue = childIndexKey:byte(byteindex+1, byteindex+1)
-				
-				return bit.band(bytevalue, bit.lshift(1,bitindex)) ~= 0
-			end,
-			done = function(root)
-				
-				print('done')
+		}
 
-				print('creating mapping of palstrs back to first in node ...')
-				-- ok now we can map pixel values and histogram keys via 'fromtoPals'
-				local fromtoPals = {}
-				for node in root:iter() do
-					if node.pts then
-						-- TODO INSTEAD reduce the palettes, and then do the remapping to the palettes of each tile
-						-- reduce to the first node in the list
-						for _,pt in ipairs(node.pts) do
-							-- if any square in the tilemap has tile pt.tile
-							-- then replace it with tile pts[1].tile
-							fromtoPals[pt.palstr] = node.pts[1].palstr
-						end
-					end
-				end
-			
-				--[[
-				print('consolidating tiles in tilesForPal...')
-				for from, to in pairs(fromtoPals) do
-					tilesForPal[to] = (tilesForPal[to] or table()):append(tilesForPal[from])
-					tilesForPal[from] = nil
-					allPalettes:removeObject(from)
-				end
-				--]]
-				
-				print('remapping colors in individual tiles...')
+		-- TODO HERE make use of applyColorMap
 
-				-- fromtocolorsPerPal[frompalstr][topalstr] = { [fromcolor] = tocolor } where fromcolor and tocolor are 24-bit integers
-				local fromtocolorsPerPal = {}
+		print('done')
+		print('creating mapping of palstrs back to first in node ...')
+		-- ok now we can map pixel values and histogram keys via 'fromtoPals'
+		local fromtoPals = {}
+		for node in root:iter() do
+			if node.pts then
+				-- TODO INSTEAD reduce the palettes, and then do the remapping to the palettes of each tile
+				-- reduce to the first node in the list
+				for _,pt in ipairs(node.pts) do
+					-- if any square in the tilemap has tile pt.tile
+					-- then replace it with tile pts[1].tile
+					fromtoPals[pt.palstr] = node.pts[1].palstr
+				end
+			end
+		end
+	
+		--[[
+		print('consolidating tiles in tilesForPal...')
+		for from, to in pairs(fromtoPals) do
+			tilesForPal[to] = (tilesForPal[to] or table()):append(tilesForPal[from])
+			tilesForPal[from] = nil
+			allPalettes:removeObject(from)
+		end
+		--]]
 		
-				-- reassign palettes
-				--for topal,tiles in pairs(tilesForPal) do
-				for _,tile in pairs(tiles) do
-					local frompal = tile.pal
-assert(#frompal % 3 == 0)
-					local topal = assert(fromtoPals[frompal])
-assert(#topal % 3 == 0)
-					if frompal ~= topal then
-					
-						local toc = table()
-						for w in topal:gmatch'......' do
-							toc:insert(vec3ub(w:byte(1,3)))
-						end
+		print('remapping colors in individual tiles...')
 
-						if not fromtocolorsPerPal[frompal] then fromtocolorsPerPal[frompal] = {} end
-						local fromto = fromtocolorsPerPal[frompal][topal]
-						if not fromto then
+		-- fromtocolorsPerPal[frompalstr][topalstr] = { [fromcolor] = tocolor } where fromcolor and tocolor are 24-bit integers
+		local fromtocolorsPerPal = {}
+
+		-- reassign palettes
+		--for topal,tiles in pairs(tilesForPal) do
+		for _,tile in pairs(tiles) do
+			local frompal = tile.pal
+assert(#frompal % 3 == 0)
+			local topal = assert(fromtoPals[frompal])
+assert(#topal % 3 == 0)
+			if frompal ~= topal then
+			
+				local toc = table()
+				for w in topal:gmatch'......' do
+					toc:insert(vec3ub(w:byte(1,3)))
+				end
+
+				if not fromtocolorsPerPal[frompal] then fromtocolorsPerPal[frompal] = {} end
+				local fromto = fromtocolorsPerPal[frompal][topal]
+				if not fromto then
 print("building from<->to map for palettes:")
 print('frompal', bintohex(frompal))
 print('topal',	bintohex(topal))
 print('from hist', bintohex(histToPal(tile.hist)))
-							fromto = {}
-							fromtocolorsPerPal[frompal][topal] = fromto
-							for w in frompal:gmatch'...' do
-								local fromc = vec3ub(w:byte(1,3))
-								local fromcolorint = int8x8x8to24(fromc:unpack())
-								local bestDist
-								local bestc
-								for _,c in ipairs(toc) do
-									local dist = (vec3d(fromc:unpack()) - vec3d(c:unpack())):lenSq()
-									if not bestDist or dist < bestDist then
-										bestDist = dist
-										bestc = c
-									end
-								end
-								local tocolorint = int8x8x8to24(bestc:unpack())
+					fromto = {}
+					fromtocolorsPerPal[frompal][topal] = fromto
+					for w in frompal:gmatch'...' do
+						local fromc = vec3ub(w:byte(1,3))
+						local fromcolorint = int8x8x8to24(fromc:unpack())
+						local bestDist
+						local bestc
+						for _,c in ipairs(toc) do
+							local dist = (vec3d(fromc:unpack()) - vec3d(c:unpack())):lenSq()
+							if not bestDist or dist < bestDist then
+								bestDist = dist
+								bestc = c
+							end
+						end
+						local tocolorint = int8x8x8to24(bestc:unpack())
 print("adding entry from "..("%06x"):format(fromcolorint).." to "..('%06x'):format(tocolorint))
-								fromto[fromcolorint] = tocolorint
-							end
-						end
-						for i=0,tile.img.width*tile.img.height-1 do
-							local p = tile.img.buffer + 3 * i
-							local fromcolorint = int8x8x8to24(p[0], p[1], p[2])
-							local tocolorint = fromto[fromcolorint]
-							if not tocolorint then
-								error("found a color not in the palette (that's why I should index the images) "
-									..('%06x'):format(fromcolorint))
-							end
-							p[0], p[1], p[2] = int24to8x8x8(tocolorint)
-						end
-					
-						tile.pal = topal
+						fromto[fromcolorint] = tocolorint
 					end
 				end
-				-- TODO now recolor the picture based on the old->new palettes
+				for i=0,tile.img.width*tile.img.height-1 do
+					local p = tile.img.buffer + 3 * i
+					local fromcolorint = int8x8x8to24(p[0], p[1], p[2])
+					local tocolorint = fromto[fromcolorint]
+					if not tocolorint then
+						error("found a color not in the palette (that's why I should index the images) "
+							..('%06x'):format(fromcolorint))
+					end
+					p[0], p[1], p[2] = int24to8x8x8(tocolorint)
+				end
+			
+				tile.pal = topal
+			end
+		end
+		-- TODO now recolor the picture based on the old->new palettes
 
-			end,
-		}
 	end
 	
 	-- rebuild and see what it looks like
