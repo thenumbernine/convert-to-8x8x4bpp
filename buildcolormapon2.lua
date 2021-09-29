@@ -1,6 +1,10 @@
 local table = require 'ext.table'
 
-local function buildHistogramQuantizationTransferMap(args)
+--[[
+build map from src to dest color to reduce number of colors
+using O(n^2) brute force search for closest colors
+--]]
+local function buildColorMapOn2(args)
 	local hist = assert(args.hist)
 	local targetSize = assert(args.targetSize)
 
@@ -80,6 +84,7 @@ local function buildHistogramQuantizationTransferMap(args)
 --print('and clearing their hist weights, hist keys are now: #'..#table.keys(hist))
 --print(table.keys(hist):mapi(function(c) return ' '..vec3ub(int24to8x8x8(c)) end):concat'\n')
 		local wk = wi + wj
+		-- weight by most popular colors
 		local ck = mergePts(ci, cj, wi/wk, wj/wk)
 --print('adding new color key '..('%06x'):format(ck)..' weight '..wk)
 	
@@ -165,4 +170,4 @@ local function buildHistogramQuantizationTransferMap(args)
 	return hist, fromto
 end
 
-return buildHistogramQuantizationTransferMap
+return buildColorMapOn2

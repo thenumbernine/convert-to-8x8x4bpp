@@ -3,8 +3,10 @@ local vector = require 'ffi.cpp.vector'
 local table = require 'ext.table'
 local quantizeOctree = require 'quantizeoctree'
 local buildHistogram = require 'buildhistogram'
-local int24to8x8x8 = require 'int24to8x8x8'
-local int8x8x8to24 = require 'int8x8x8to24'
+local applyColorMap = require 'applycolormap'
+local replaceIntKeysWithStrs = require 'replaceintkeyswithstrs'
+local replaceStrKeysWithInts = require 'replacestrkeyswithints'
+local inttobin = require 'inttobin'
 
 local function reduceColorsOctree(args)
 	local img = assert(args.img)
@@ -12,6 +14,7 @@ local function reduceColorsOctree(args)
 	local hist = args.hist or buildHistogram(img)
 
 	img = img:clone()
+	
 	quantizeOctree{
 		dim = 3,
 		targetSize = targetSize,
@@ -20,9 +23,10 @@ local function reduceColorsOctree(args)
 		splitSize = 1,	-- pt per node
 		buildRoot = function(root)
 			for k,v in pairs(hist) do
+				local key = inttobin(k, 3)
 				root:addToTree{
-					key = k,
-					pos = vector('double', {int24to8x8x8(k)}),
+					key = key,
+					pos = vector('double', {key:byte(1,3)}),
 					weight = v,
 				}
 			end
@@ -41,24 +45,19 @@ local function reduceColorsOctree(args)
 			local fromto = {}
 			for node in root:iter() do
 				if node.pts then
+					-- pick target by weight not just the first
+					node.pts:sort(function(a,b) return a.weight > b.weight end)
 					-- reduce to the first node in the list
 					for _,pt in ipairs(node.pts) do
 						fromto[pt.key] = node.pts[1].key
 					end
 				end
 			end				
+			
 			-- TODO convert 'dest' *HERE* into an indexed image
-			for i=0,img.width*img.height-1 do
-				local p = img.buffer + 3 * i
-				local key = int8x8x8to24(p[0], p[1], p[2])
-				p[0], p[1], p[2] = int24to8x8x8(fromto[key])
-			end
-			local newhist = {}
-			for k,v in pairs(hist) do
-				local tokey = fromto[k]
-				newhist[tokey] = (newhist[tokey] or 0) + v
-			end
-			hist = newhist
+			hist = replaceIntKeysWithStrs(hist, 3)
+			img, hist = applyColorMap(img, fromto, hist)
+			hist = replaceStrKeysWithInts(hist)
 			assert(#table.keys(hist) <= targetSize)
 		end,
 	}

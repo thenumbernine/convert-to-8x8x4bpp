@@ -12,15 +12,16 @@ local vec3ub = require 'vec-ffi.vec3ub'
 local vec3d = require 'vec-ffi.vec3d'
 local Image = require 'image'
 
-local reduceColorsLinear = require 'reducecolorslinear'
-local buildHistogramQuantizationTransferMap = require 'buildhistqxfermap'
+local reduceColorsOn2 = require 'reducecolorson2'
+local reduceColorsOctree = require 'reducecolorsoctree'
+local reduceColorsImageMagick = require 'reducecolorsimagemagick'
+local buildColorMapOn2 = require 'buildcolormapon2'
 local buildHistogram = require 'buildhistogram'
 local quantizeOctree = require 'quantizeoctree'	-- TODO rename to 'quantizeoctree' or something
-local reduceColorsOctree = require 'reducecolorsoctree'
 local bintohex = require 'bintohex'
 local int24to8x8x8 = require 'int24to8x8x8'
 local int8x8x8to24 = require 'int8x8x8to24'
-
+local binweightedmerge = require 'binweightedmerge'
 local filename = ... or 'map-tex-small-brighter.png'
 local img = Image(filename)
 local basefilename = filename:sub(1,-5)
@@ -625,7 +626,7 @@ elseif option == 'D' then
 print'reducing each tile to 15 colors...'
 	local targetPaletteSize = 15
 	for _,tile in pairs(tiles) do
-		tile.img, tile.hist = reduceColorsLinear{img=tile.img, targetSize=targetPaletteSize, hist=tile.hist}
+		tile.img, tile.hist = reduceColorsOn2{img=tile.img, targetSize=targetPaletteSize, hist=tile.hist}
 	end
 	rebuildTiles(tiles, ts, tw, th):save(basefilename..'-quant16linear.png')
 	
@@ -659,13 +660,13 @@ print'creating palette histogram...'
 
 print'reducing all palettes to only 16...'
 		local fromto
-		palhist, fromto = buildHistogramQuantizationTransferMap{
+		palhist, fromto = buildColorMapOn2{
 			hist = palhist,
 			targetSize = 16,
 			-- TODO replace with a more flexible distance
 			-- also TODO abstract the distance return (object) and conversion to number so I can cache the coherency between palette pairs
 			dist = require 'bindistsq',	
-			merge = require 'binweightedmerge',
+			merge = binweightedmerge,
 		}
 		for _,tile in pairs(tiles) do
 			local newpal = fromto[tile.pal]
@@ -714,7 +715,80 @@ elseif option == 'E' then
 		end
 		return dstImg
 	end
+	
+	local function removeLumInPlace(p)
+		p[0], p[1], p[2] = (vec3d(p[0], p[1], p[2]):normalize() * 255):map(math.floor):unpack()
+	end
 
+	local greyweights = vec3d(.3, .55, .15)
+	local planes = table()
+	for i=0,2 do
+		for j=0,1 do
+			local v = vec3d()
+			v.s[i] = 2*j-1
+			local p = vec3d(1-j,1-j,1-j)
+			local w = -p:dot(v)
+			planes:insert{v=v, w=w}
+		end
+	end	
+	local function removeSatLumInPlace(p)
+		local c = vec3d(p[0], p[1], p[2]):normalize()
+		local l = c:dot(greyweights)
+		local a = vec3d(l,l,l)
+		local b = c - a
+		-- v + s * d, s >= 0, intersect with [0,1] cube
+		-- (a + s * b) = point on line, intersect with a plane (v, w) where a dot v + w = 0, w = -v dot p, p = point on plane, such that p dot v + w = p dot v + (-p dot v) = 0
+		-- (a + s * b) dot v + w = 0 <=> a dot v + s * b dot v = -w <=> s = -(w + a dot v) / (b dot v)
+		local bests = math.huge
+		for _,plane in ipairs(planes) do
+			local s = -(plane.w + plane.v:dot(a)) / b:dot(plane.v)
+			if s >= 0 and s < bests then
+				bests = s
+			end
+		end
+		local v = a + b * bests
+		p[0], p[1], p[2] = v:map(function(x) return math.clamp(math.floor(x * 255), 0, 255) end):unpack()
+	end
+
+	-- i might have SatVal and SatLum names mixed up
+	local function removeSatValInPlace(p)
+		local v = vec3d(p[0], p[1], p[2])
+		v = v * (255 / v:lInfLength())
+		p[0], p[1], p[2] = v:map(math.floor):unpack()
+	end
+
+	-- still seeing too many final images get dark ... 
+	--[[ maybe I should remove lum up front? nah, too bright
+	do
+		local p = img.buffer
+		for i=0,img.width*img.height-1 do
+			removeLumInPlace(p)
+			p = p + 3
+		end
+	end
+	tiles, tw, th = splitImageIntoTiles(img, ts)
+	--]]
+	--[[ remove lum and sat up front? 
+	do
+		local p = img.buffer
+		for i=0,img.width*img.height-1 do
+			removeSatLumInPlace(p)
+			p = p + 3
+		end
+		-- seems to draw out some extra tiles and make our tile count not match up ...
+		local blankTile = Image(ts, ts, 3, 'unsigned char'):clear()
+		for y=0,th-1 do
+			for x=0,tw-1 do
+				if not tiles[1 + x + tw * y] then
+					img:pasteInto{image=blankTile, x=x*ts, y=y*ts}
+				end
+			end
+		end
+		-- this doesn't fix that... hmm...
+		-- oh well, the before-downsample looks as bad as it does with removing lum alone
+	end
+	tiles, tw, th = splitImageIntoTiles(img, ts)
+	--]]
 
 	print'sizing down image...'
 	--[[
@@ -755,48 +829,50 @@ elseif option == 'E' then
 			assert(x >= 0 and x < tw and y >= 0 and y < th)
 			local src = img1pixpertile.buffer + 3 * (i-1)
 			local dst = temp.buffer + 3 * (x + tw * y)
-			--[[ is ffi.copy bad for small values?
 			ffi.copy(dst, src, 3)
-			--]]
-			-- [[
-			for j=0,2 do
-				dst[j] = src[j]
-			end
-			--]]
 		end
 		return temp
 	end
 	convertDownsampledTileSeqToImg(img1pixpertile):save(basefilename..'-1pix-per-tile-after-downsample.png')
-	
---[[ without tweaking downsampled colors
-	local img1pixpertilefilename = 'img1pixpertilefilename-cache.png'
+
+	--local invWeightMerge = true
+	local invWeightMerge = false
+
+-- [[ without tweaking downsampled colors
+	local img1pixpertilefilename = 'img1pixpertilefilename-cache.png'..(invWeightMerge and '-invweight' or '')
 --]]
--- [[ even with linear search of closest downsampled colors per tile (which takes 12 mins), i'm still getting a lot of clustering together of darker tiles, whether they are predominantly green, red, pink, etc
+--[[ even with linear search of closest downsampled colors per tile (which takes 12 mins), i'm still getting a lot of clustering together of darker tiles, whether they are predominantly green, red, pink, etc
 -- so instead, how about here we look at only hue? or only hue and saturation (i.e. just normalize the color vector)
 -- with this, removing lum only (just 'normalize')
-	local img1pixpertilefilename = 'img1pixpertilefilename-cache-removing-lum.png'
+	local img1pixpertilefilename = 'img1pixpertilefilename'..(invWeightMerge and '-invweight' or '')..'-cache-removing-lum.png'
 	do
 		local p = img1pixpertile.buffer
 		for i=0,img1pixpertile.width-1 do
-			p[0], p[1], p[2] = (vec3d(p[0], p[1], p[2]):normalize() * 255):map(math.floor):unpack()
+			removeLumInPlace(p)
 			p = p + 3
 		end
 	end
 --]]
 --[[ with this, removing both lum and sat ('normalize', then project outward from (l,l,l) grey line)
-	local img1pixpertilefilename = 'img1pixpertilefilename-cache-removing-lum-and-sat.png'
+	local img1pixpertilefilename = 'img1pixpertilefilename'..(invWeightMerge and '-invweight' or '')..'-cache-removing-lum-and-sat.png'
 	do
-		local greyweights = vec3d(.3, .55, .15)
 		local p = img1pixpertile.buffer
 		for i=0,img1pixpertile.width-1 do
-			local v = vec3d(p[0], p[1], p[2]):normalize()
-			local l = v:dot(greyweights)
-			v = v * 255
-			p[0], p[1], p[2] = v:map(math.floor):unpack()
+			removeSatLumInPlace(p)
 			p = p + 3
 		end
 	end
---]]	
+--]]
+--[[
+	local img1pixpertilefilename = 'img1pixpertilefilename'..(invWeightMerge and '-invweight' or '')..'-cache-removing-val-and-sat.png'
+	do
+		local p = img1pixpertile.buffer
+		for i=0,img1pixpertile.width-1 do
+			removeSatValInPlace(p)
+			p = p + 3
+		end
+	end
+--]]
 	if img1pixpertile.height ~= #img1pixelIndexToXY then
 		error("expected img1pixpertile.height =="..img1pixpertile.height.." to equal #img1pixelIndexToXY=="..#img1pixelIndexToXY)
 	end
@@ -813,24 +889,35 @@ elseif option == 'E' then
 		print(('%d%%'):format(100*percent), s..'s', 'numColors='..numColors)
 	end
 
+	--[[ using my slow methods
+	-- linear goes slow for this sized pic, cuz it is O(n^2) ... takes 12 mins for reducing 1200 colors
 	if os.fileexists(img1pixpertilefilename) then
 		img1pixpertile = Image(img1pixpertilefilename)
 		hist = buildHistogram(img1pixpertile)
 	else
-		-- [[ linear goes slow for this sized pic, cuz it is O(n^2) ... takes 12 mins for reducing 1200 colors
-		img1pixpertile, hist = reduceColorsLinear{
+		img1pixpertile, hist = reduceColorsOn2{
 			img = img1pixpertile,
 			targetSize = 16,	-- 16 unique palettes
 			progress = progress,
+			merge = invWeightMerge 
+				and function(a,b,s,t)
+					s, t = 1/s, 1/t
+					sum = s + t
+					return binweightedmerge(a, b, s/sum, t/sum)
+				end
+				or binweightedmerge,
 		}
-		--]]
-		--[[ octree seems to group all the tiles up to the first entry ... hmm, why is this ...
-		-- TODO instead of merging octree leafs (which gives ugly performance), do a legit nearest search, start with the deepest and closest nodes, prune nodes too far away, and also re-insert the weighted merged point instead of just replacing points 
-		-- then this would have better performance but same results as the linear search
-		img1pixpertile, hist = reduceColorsOctree{img=img1pixpertile, targetSize=16}	-- 16 unique palettes
-		--]]
 		img1pixpertile:save(img1pixpertilefilename)
 	end
+	--]]
+	-- [[ octree seems to group all the tiles up to the first entry ... hmm, why is this ...
+	-- TODO instead of merging octree leafs (which gives ugly performance), do a legit nearest search, start with the deepest and closest nodes, prune nodes too far away, and also re-insert the weighted merged point instead of just replacing points 
+	-- then this would have better performance but same results as the linear search
+	img1pixpertile, hist = reduceColorsOctree{img=img1pixpertile, targetSize=16}	-- 16 unique palettes
+	--]]
+	--[[ using imagemagick
+	img1pixpertile, hist = reduceColorsImageMagick{img=img1pixpertile, targetSize=16}	-- 16 unique palettes
+	--]]
 
 	-- output a debug image
 	convertDownsampledTileSeqToImg(img1pixpertile):save(basefilename..'-1pix-per-tile-after-quant.png')
@@ -849,11 +936,11 @@ elseif option == 'E' then
 		local x,y = table.unpack(img1pixelIndexToXY[i])
 		local color = int8x8x8to24(p[0], p[1], p[2])
 		local index = indexForColor[color]
-		local tiles = tilesForColor[index+1]
-		if not index or not tiles then
+		local ctiles = tilesForColor[index+1]
+		if not index or not ctiles then
 			error("couldn't find index for color "..vec3ub(int24to8x8x8(color)))
 		end
-		tiles:insert{
+		ctiles:insert{
 			x = x,
 			y = y,
 			img = img:copy{x=x*ts, y=y*ts, width=ts, height=ts},
@@ -862,30 +949,38 @@ elseif option == 'E' then
 	end
 
 	local finalPalette = Image(16,16,3,'unsigned char'):clear()
-	local numTiles = tilesForColor:mapi(function(tiles) return #tiles end):sum()
-	print('we have a total of '..numTiles..' tiles')
-	local newimg = img:clone():clear()
-	for j,tiles in ipairs(tilesForColor) do
-print('high-nibble '..(j-1)..' has '..#tiles..' tiles')
-		local timg = Image(ts, #tiles * ts, 3, 'unsigned char')
-		for i,tile in ipairs(tiles) do
+	local numTiles = tilesForColor:mapi(function(ctiles) return #ctiles end):sum()
+print('we have a total of '..numTiles..' tiles')
+	for j,ctiles in ipairs(tilesForColor) do
+print('high-nibble '..(j-1)..' has '..#ctiles..' tiles')
+		local timg = Image(ts, #ctiles * ts, 3, 'unsigned char')
+		for i,tile in ipairs(ctiles) do
 			timg:pasteInto{image=tile.img, x=0, y=(i-1)*ts}
 		end
-		if #tiles > 0 then
+		if #ctiles > 0 then
 			local wrapped = graphicsWrapRows(timg, ts, 16)
 			wrapped:save('color '..(j-1)..' tiles.png')
 		end
 		-- now quantize each img-per-regionmap palette into 15 colors
-		--local qimg = reduceColorsLinear{img=timg, targetSize=15, progress=progress}	-- if 1200 -> 16 points above took 12 mins, this is 3000 points .. soo  .... much longer 
+		--[[
+		local qimg = reduceColorsOn2{img=timg, targetSize=15, progress=progress}	-- if 1200 -> 16 points above took 12 mins, this is 3000 points .. soo  .... much longer 
+		--]]
+		-- [[
 		local qimg, hist = reduceColorsOctree{img=timg, targetSize=15}	-- ugly, as octree search is ugly atm. TODO fixme, do a real search (not approximate) and real merge (re-insert, don't just remove/replace points), use octree for pruning
-		if #tiles > 0 then
+		--]]
+		--[[
+		local qimg, hist = reduceColorsImageMagick{img=timg, targetSize=15}
+		--]]
+		if #ctiles > 0 then
 			local wrapped = graphicsWrapRows(qimg, ts, 16)
 			wrapped:save('quant15 color '..(j-1)..' tiles.png')
 		end
 		-- now that the imgs have been quantized as well, paste everything back together
-		for i,tile in ipairs(tiles) do
+		for i,tile in ipairs(ctiles) do
 			assert((i-1)*ts < qimg.height)
-			newimg:pasteInto{x=tile.x*ts, y=tile.y*ts, image=qimg:copy{x=0, y=(i-1)*ts, width=ts, height=ts}}
+			local tileIndex = 1 + tile.x + tw * tile.y
+			local tileimg = qimg:copy{x=0, y=(i-1)*ts, width=ts, height=ts}
+			tiles[tileIndex].img = tileimg
 		end
 		
 		local p = finalPalette.buffer + 3 * 16 * (j-1)
@@ -894,8 +989,61 @@ print('high-nibble '..(j-1)..' has '..#tiles..' tiles')
 			p = p + 3
 		end
 	end
+	
+	local newimg = rebuildTiles(tiles, ts, tw, th)
 	newimg:save(basefilename..'-16tiles-16colors-dsqa.png')	-- dsqa = "downsample quanization association of tiles"
+
 	finalPalette:save(basefilename..'-dsqa-palette.png')
+
+	--[=[
+	--[[
+	ok now I have too many tiles ... 1303 versus a max possible of 768 in the tileset, or only about 80 or so if you only want to use map+free tiles in the tileset
+	now to reduce those
+	how to reduce those
+	for each tile, make a 7x7 luminance gradient image, then quantize those
+	--]]
+	do
+		local tilesForGradStrs = {}
+		for _,tile in pairs(tiles) do
+			local grey = tile.img:greyscale()
+			local grad = Image(ts-1, ts-1, 2, 'char')
+			for j=0,ts-2 do
+				for i=0,ts-2 do
+					local p = grad.buffer + grad.channels * (i + grad.width * j)
+					p[0] = grey.buffer[i+1 + ts * j] - grey.buffer[i + ts * j]
+					p[1] = grey.buffer[i + ts * (j+1)] - grey.buffer[i + ts * j]
+				end
+			end
+			-- I guess I don't need an Image, just a buffer ...
+			local gradstr = ffi.string(grad.buffer, grad.channels * grad.width * grad.height)
+			tilesForGradStrs[gradstr] = tilesForGradStrs[gradstr] or table()
+			tilesForGradStrs[gradstr]:insert(tile)
+			tile.gradstr = gradstr
+		end
+		
+		local tilegradhist, fromto = buildColorMapOn2{
+			hist = table.map(tilesForGradStrs, function(tiles) return #tiles end):setmetatable(nil),
+			targetSize = 768,	-- target number of tiles
+			dist = require 'bindistsq',	
+			merge = function(a,b,s,t)
+				return s > t and a or b	-- directly replace the more popular point.  this way all target colors are among the source colors.
+			end,
+			progress = progress,
+		}
+		for _,tileIndex in ipairs(table.keys(tiles)) do
+			local tile = tiles[tileIndex]
+			local newgradstr = fromto[tile.gradstr]
+			if newgradstr ~= tile.gradstr then
+				-- TODO a better solution might be some gauss seidel using the boundary conditions (like my gradient based copy paste trick)
+				local newtiles = tilesForGradStrs[newgradstrs]
+TODO even with the replace() merge() function, this still gets nil entries
+				tile.img = newtiles[math.random(#newtiles)].img:clone()
+			end
+		end
+	end
+	newimg:save(basefilename..'-16tiles-16colors-dsqa-quanttiles.png')	-- dsqa = "downsample quanization association of tiles"
+	--]=]
+
 	print'done'
 else
 	error'here'
