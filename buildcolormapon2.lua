@@ -24,7 +24,7 @@ local function buildColorMapOn2(args)
 	end
 
 --print('colors: #'..#colors)
---print(colors:mapi(function(c) return ' '..vec3ub(int24to8x8x8(c)) end):concat'\n')
+--print(colors:mapi(function(c) return ' '..bintohex(c) end):concat'\n')
 	local distSqs = colors:mapi(function(ci,i)
 		return colors:mapi(function(cj,j)
 			return i == j and 0 or calcPtDist(ci, cj)
@@ -69,7 +69,7 @@ local function buildColorMapOn2(args)
 		if not cj then
 			error("pairsForDists had "..j.." but there is no color")
 		end
---print('combining '..vec3ub(int24to8x8x8(ci))..' and '..vec3ub(int24to8x8x8(cj)))
+--print('combining '..bintohex(ci)..' and '..bintohex(cj))
 		local wi = hist[ci]
 		if not wi then
 			error("couldn't find weight for color key "..bintohex(ci))
@@ -82,7 +82,7 @@ local function buildColorMapOn2(args)
 		hist[cj] = nil
 
 --print('and clearing their hist weights, hist keys are now: #'..#table.keys(hist))
---print(table.keys(hist):mapi(function(c) return ' '..vec3ub(int24to8x8x8(c)) end):concat'\n')
+--print(table.keys(hist):mapi(function(c) return ' '..bintohex(c) end):concat'\n')
 		local wk = wi + wj
 		-- weight by most popular colors
 		local ck = mergePts(ci, cj, wi/wk, wj/wk)
@@ -167,7 +167,7 @@ local function buildColorMapOn2(args)
 		end
 	end
 --print'done'
-	return hist, fromto
+	return fromto, hist
 end
 
 return buildColorMapOn2

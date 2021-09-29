@@ -15,12 +15,11 @@ local Image = require 'image'
 local reduceColorsOn2 = require 'reducecolorson2'
 local reduceColorsOctree = require 'reducecolorsoctree'
 local reduceColorsImageMagick = require 'reducecolorsimagemagick'
+local reduceColorsMedianCut = require 'reducecolorsmediancut'
 local buildColorMapOn2 = require 'buildcolormapon2'
 local buildHistogram = require 'buildhistogram'
 local quantizeOctree = require 'quantizeoctree'	-- TODO rename to 'quantizeoctree' or something
 local bintohex = require 'bintohex'
-local int24to8x8x8 = require 'int24to8x8x8'
-local int8x8x8to24 = require 'int8x8x8to24'
 local binweightedmerge = require 'binweightedmerge'
 local filename = ... or 'map-tex-small-brighter.png'
 local img = Image(filename)
@@ -43,7 +42,7 @@ local function splitImageIntoTiles(img, tileSize)
 			local hist = buildHistogram(tileimg)
 			local keys = table.keys(hist)
 			-- all black <-> don't use
-			if #keys == 1 and keys[1] == 0 then
+			if #keys == 1 and keys[1] == string.char(0,0,0) then
 				hist = {}
 				keys = {}
 			end
@@ -95,9 +94,7 @@ if option == 'A' then
 	end
 
 	local function histToPal(hist)
-		return table.keys(hist):sort():mapi(function(key)
-			return string.char(int24to8x8x8(key))
-		end):sort():concat()
+		return table.keys(hist):sort():concat()
 	end
 
 	-- build palettes for each - as 48-byte strings
@@ -313,7 +310,7 @@ print('from hist', bintohex(histToPal(tile.hist)))
 					fromtocolorsPerPal[frompal][topal] = fromto
 					for w in frompal:gmatch'...' do
 						local fromc = vec3ub(w:byte(1,3))
-						local fromcolorint = int8x8x8to24(fromc:unpack())
+						local fromcolorint = ffi.string(fromc.s, 3)
 						local bestDist
 						local bestc
 						for _,c in ipairs(toc) do
@@ -323,20 +320,19 @@ print('from hist', bintohex(histToPal(tile.hist)))
 								bestc = c
 							end
 						end
-						local tocolorint = int8x8x8to24(bestc:unpack())
-print("adding entry from "..("%06x"):format(fromcolorint).." to "..('%06x'):format(tocolorint))
+						local tocolorint = ffi.string(bestc.s, 3)
+print("adding entry from "..bintohex(fromcolorint).." to "..bintohex(tocolorint))
 						fromto[fromcolorint] = tocolorint
 					end
 				end
 				for i=0,tile.img.width*tile.img.height-1 do
 					local p = tile.img.buffer + 3 * i
-					local fromcolorint = int8x8x8to24(p[0], p[1], p[2])
+					local fromcolorint = ffi.string(p, 3)
 					local tocolorint = fromto[fromcolorint]
 					if not tocolorint then
-						error("found a color not in the palette (that's why I should index the images) "
-							..('%06x'):format(fromcolorint))
+						error("found a color not in the palette (that's why I should index the images) "..bintohex(fromcolorint))
 					end
-					p[0], p[1], p[2] = int24to8x8x8(tocolorint)
+					ffi.copy(p, ffi.cast('unsigned char*', tocolorint), 3)
 				end
 			
 				tile.pal = topal
@@ -429,7 +425,7 @@ elseif option == 'C' then
 				local src = tile.img.buffer
 				local dst = indexedImg.buffer
 				for ofs=0,ts*ts-1 do
-					local srccolor = int8x8x8to24(src[0], src[1], src[2])
+					local srccolor = ffi.string(src, 3)
 					dst[0] = assert(tile.indexForColors[srccolor])-1
 					src = src + 3
 					dst = dst + 1
@@ -620,10 +616,7 @@ print'creating palette histogram...'
 			--]]
 			while #histkeys < 15 do histkeys:insert(1, 0) end
 			
-			local pal = histkeys:sort():mapi(function(c)
-				local r,g,b = int24to8x8x8(c)
-				return string.char(r,g,b)
-			end):concat()
+			local pal = histkeys:sort():concat()
 			tile.pal = pal
 			palhist[pal] = (palhist[pal] or 0) + 1
 		end
@@ -632,8 +625,7 @@ print'creating palette histogram...'
 		end
 
 print'reducing all palettes to only 16...'
-		local fromto
-		palhist, fromto = buildColorMapOn2{
+		local fromto, palhist = buildColorMapOn2{
 			hist = palhist,
 			targetSize = 16,
 			-- TODO replace with a more flexible distance
@@ -766,7 +758,7 @@ elseif option == 'E' then
 	print'sizing down image...'
 	--[[
 	local img1pixpertile = img:resize(img.width / ts, img.height / ts)
-	--]]	
+	--]]
 	-- [=[ need to remove the black tiles
 	local img1pixpertile = Image(ts, ts*#table.keys(tiles), 3, 'unsigned char')
 	local img1pixelIndexToXY = table()
@@ -883,13 +875,16 @@ elseif option == 'E' then
 		img1pixpertile:save(img1pixpertilefilename)
 	end
 	--]]
-	-- [[ octree seems to group all the tiles up to the first entry ... hmm, why is this ...
+	--[[ octree seems to group all the tiles up to the first entry ... hmm, why is this ...
 	-- TODO instead of merging octree leafs (which gives ugly performance), do a legit nearest search, start with the deepest and closest nodes, prune nodes too far away, and also re-insert the weighted merged point instead of just replacing points 
 	-- then this would have better performance but same results as the linear search
 	img1pixpertile, hist = reduceColorsOctree{img=img1pixpertile, targetSize=16}	-- 16 unique palettes
 	--]]
 	--[[ using imagemagick
 	img1pixpertile, hist = reduceColorsImageMagick{img=img1pixpertile, targetSize=16}	-- 16 unique palettes
+	--]]
+	-- [[
+	img1pixpertile, hist = reduceColorsMedianCut{img=img1pixpertile, targetSize=16}	-- 16 unique palettes
 	--]]
 
 	-- output a debug image
@@ -899,7 +894,7 @@ elseif option == 'E' then
 	local colors = table.keys(hist):sort()
 	print'palette:'
 	for _,color in ipairs(colors) do
-		print('',vec3ub(int24to8x8x8(color)))
+		print('',vec3ub(color:byte(1,3)))
 	end
 	local indexForColor = colors:mapi(function(key,i) return i-1,key end)	-- map from 24-bit color to 0-based index
 	print'grouping tiles by downsampled image unique 16-color quantization...' 
@@ -907,11 +902,11 @@ elseif option == 'E' then
 	local p = img1pixpertile.buffer
 	for i,xy in ipairs(img1pixelIndexToXY) do
 		local x,y = table.unpack(img1pixelIndexToXY[i])
-		local color = int8x8x8to24(p[0], p[1], p[2])
+		local color = ffi.string(p, 3)
 		local index = indexForColor[color]
 		local ctiles = tilesForColor[index+1]
 		if not index or not ctiles then
-			error("couldn't find index for color "..vec3ub(int24to8x8x8(color)))
+			error("couldn't find index for color "..vec3ub(color:byte(1,3)))
 		end
 		ctiles:insert{
 			x = x,
@@ -934,16 +929,13 @@ print('high-nibble '..(j-1)..' has '..#ctiles..' tiles')
 			local wrapped = graphicsWrapRows(timg, ts, 16)
 			wrapped:save('color '..(j-1)..' tiles.png')
 		end
+		
 		-- now quantize each img-per-regionmap palette into 15 colors
-		--[[
-		local qimg = reduceColorsOn2{img=timg, targetSize=15, progress=progress}	-- if 1200 -> 16 points above took 12 mins, this is 3000 points .. soo  .... much longer 
-		--]]
-		-- [[
-		local qimg, hist = reduceColorsOctree{img=timg, targetSize=15}	-- ugly, as octree search is ugly atm. TODO fixme, do a real search (not approximate) and real merge (re-insert, don't just remove/replace points), use octree for pruning
-		--]]
-		--[[
-		local qimg, hist = reduceColorsImageMagick{img=timg, targetSize=15}
-		--]]
+		--local qimg = reduceColorsOn2{img=timg, targetSize=15, progress=progress}	-- if 1200 -> 16 points above took 12 mins, this is 3000 points .. soo  .... much longer 
+		--local qimg, hist = reduceColorsOctree{img=timg, targetSize=15}	-- ugly, as octree search is ugly atm. TODO fixme, do a real search (not approximate) and real merge (re-insert, don't just remove/replace points), use octree for pruning
+		--local qimg, hist = reduceColorsImageMagick{img=timg, targetSize=15}
+		local qimg, hist = reduceColorsMedianCut{img=timg, targetSize=15}
+
 		if #ctiles > 0 then
 			local wrapped = graphicsWrapRows(qimg, ts, 16)
 			wrapped:save('quant15 color '..(j-1)..' tiles.png')
@@ -958,7 +950,7 @@ print('high-nibble '..(j-1)..' has '..#ctiles..' tiles')
 		
 		local p = finalPalette.buffer + 3 * 16 * (j-1)
 		for i,c in ipairs(table.keys(hist):sort()) do
-			p[0], p[1], p[2] = int24to8x8x8(c)
+			ffi.copy(p, ffi.cast('unsigned char*', c), 3)
 			p = p + 3
 		end
 	end
@@ -994,7 +986,7 @@ print('high-nibble '..(j-1)..' has '..#ctiles..' tiles')
 			tile.gradstr = gradstr
 		end
 		
-		local tilegradhist, fromto = buildColorMapOn2{
+		local fromto, tilegradhist = buildColorMapOn2{
 			hist = table.map(tilesForGradStrs, function(tiles) return #tiles end):setmetatable(nil),
 			targetSize = 768,	-- target number of tiles
 			dist = require 'bindistsq',	

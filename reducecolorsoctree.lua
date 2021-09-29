@@ -1,12 +1,8 @@
-local bit = require 'bit'
 local vector = require 'ffi.cpp.vector'
 local table = require 'ext.table'
 local quantizeOctree = require 'quantizeoctree'
 local buildHistogram = require 'buildhistogram'
 local applyColorMap = require 'applycolormap'
-local replaceIntKeysWithStrs = require 'replaceintkeyswithstrs'
-local replaceStrKeysWithInts = require 'replacestrkeyswithints'
-local inttobin = require 'inttobin'
 
 local function reduceColorsOctree(args)
 	local img = assert(args.img)
@@ -22,8 +18,7 @@ local function reduceColorsOctree(args)
 		maxv = 255,
 		splitSize = 1,	-- pt per node
 		buildRoot = function(root)
-			for k,v in pairs(hist) do
-				local key = inttobin(k, dim)
+			for key,v in pairs(hist) do
 				root:addToTree{
 					key = key,
 					pos = vector('double', {key:byte(1,dim)}),
@@ -47,9 +42,7 @@ local function reduceColorsOctree(args)
 	end
 	
 	-- TODO convert 'dest' *HERE* into an indexed image
-	hist = replaceIntKeysWithStrs(hist, dim)
 	img, hist = applyColorMap(img, fromto, hist)
-	hist = replaceStrKeysWithInts(hist)
 	assert(#table.keys(hist) <= targetSize)
 
 	return img, hist

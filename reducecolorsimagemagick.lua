@@ -1,6 +1,7 @@
 local table = require 'ext.table'
 local Image = require 'image'
 local buildHistogram = require 'buildhistogram'
+
 local function reduceColorsImageMagick(args)
 	local img = assert(args.img)
 	local targetSize = assert(args.targetSize)
@@ -20,4 +21,5 @@ local function reduceColorsImageMagick(args)
 	assert(#table.keys(hist) <= targetSize)
 	return newimg, hist
 end
+
 return reduceColorsImageMagick
