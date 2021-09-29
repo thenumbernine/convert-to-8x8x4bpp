@@ -16,11 +16,12 @@ local reduceColorsOn2 = require 'reducecolorson2'
 local reduceColorsOctree = require 'reducecolorsoctree'
 local reduceColorsImageMagick = require 'reducecolorsimagemagick'
 local reduceColorsMedianCut = require 'reducecolorsmediancut'
-local buildColorMapOn2 = require 'buildcolormapon2'
+local buildColorMapMedianCut = require 'buildcolormapmediancut'
 local buildHistogram = require 'buildhistogram'
 local quantizeOctree = require 'quantizeoctree'	-- TODO rename to 'quantizeoctree' or something
 local bintohex = require 'bintohex'
 local binweightedmerge = require 'binweightedmerge'
+
 local filename = ... or 'map-tex-small-brighter.png'
 local img = Image(filename)
 local basefilename = filename:sub(1,-5)
@@ -625,7 +626,7 @@ print'creating palette histogram...'
 		end
 
 print'reducing all palettes to only 16...'
-		local fromto, palhist = buildColorMapOn2{
+		local fromto, palhist = buildColorMapMedianCut{
 			hist = palhist,
 			targetSize = 16,
 			-- TODO replace with a more flexible distance
@@ -955,58 +956,85 @@ print('high-nibble '..(j-1)..' has '..#ctiles..' tiles')
 		end
 	end
 	
-	local newimg = rebuildTiles(tiles, ts, tw, th)
-	newimg:save(basefilename..'-16tiles-16colors-dsqa.png')	-- dsqa = "downsample quanization association of tiles"
+	rebuildTiles(tiles, ts, tw, th):save(basefilename..'-16tiles-16colors-dsqa.png')	-- dsqa = "downsample quanization association of tiles"
 
 	finalPalette:save(basefilename..'-dsqa-palette.png')
 
-	--[=[
+	-- [=[
 	--[[
 	ok now I have too many tiles ... 1303 versus a max possible of 768 in the tileset, or only about 80 or so if you only want to use map+free tiles in the tileset
 	now to reduce those
 	how to reduce those
 	for each tile, make a 7x7 luminance gradient image, then quantize those
 	--]]
-	do
-		local tilesForGradStrs = {}
+	local function quantizeTiles(targetSize)	-- TODO right now this is destructive to 'tiles'
+		local offsets = {{1,0},{0,1}}
+		local tilesForCmpImgStrs = {}
 		for _,tile in pairs(tiles) do
-			local grey = tile.img:greyscale()
-			local grad = Image(ts-1, ts-1, 2, 'char')
+			--[[ compare gradient of greyscale image
+			local greyimg = tile.img:greyscale()
+			local cmpimg = Image(ts-1, ts-1, 2, 'char')
+			local p = cmpimg.buffer
 			for j=0,ts-2 do
 				for i=0,ts-2 do
-					local p = grad.buffer + grad.channels * (i + grad.width * j)
-					p[0] = grey.buffer[i+1 + ts * j] - grey.buffer[i + ts * j]
-					p[1] = grey.buffer[i + ts * (j+1)] - grey.buffer[i + ts * j]
+					for side,ofs in ipairs(offsets) do
+						p[0] = greyimg.buffer[i + ofs[1] + ts * (j + ofs[2])] - greyimg.buffer[i + ts * j]
+						p = p + 1
+					end
 				end
 			end
+			--]]
+			--[[ compare gradient of rgb image
+			local greyimg = tile.img:greyscale()
+			local cmpimg = Image(ts-1, ts-1, 6, 'char')
+			local p = cmpimg.buffer
+			for j=0,ts-2 do
+				for i=0,ts-2 do
+					for k=0,2 do
+						for side,ofs in ipairs(offsets) do
+							p[0] = tile.img.buffer[k + 3 * (i + ofs[1] + ts * (j + ofs[2]))] - tile.img.buffer[k + 3 * (i + ts * j)]
+							p = p + 1
+						end
+					end
+				end
+			end
+			--]]		
+			-- [[ curvature?
+			local cmpimg = tile.img:greyscale():curvature()
+			--]]
+			--[[ compare using rgb of the images themselves
+			local cmpimg = tile.img:clone()
+			--]]
 			-- I guess I don't need an Image, just a buffer ...
-			local gradstr = ffi.string(grad.buffer, grad.channels * grad.width * grad.height)
-			tilesForGradStrs[gradstr] = tilesForGradStrs[gradstr] or table()
-			tilesForGradStrs[gradstr]:insert(tile)
-			tile.gradstr = gradstr
+			local cmpImgStr = ffi.string(cmpimg.buffer, cmpimg.channels * cmpimg.width * cmpimg.height)
+			tilesForCmpImgStrs[cmpImgStr] = tilesForCmpImgStrs[cmpImgStr] or table()
+			tilesForCmpImgStrs[cmpImgStr]:insert(tile)
+			tile.cmpImgStr = cmpImgStr
 		end
-		
-		local fromto, tilegradhist = buildColorMapOn2{
-			hist = table.map(tilesForGradStrs, function(tiles) return #tiles end):setmetatable(nil),
-			targetSize = 768,	-- target number of tiles
-			dist = require 'bindistsq',	
-			merge = function(a,b,s,t)
-				return s > t and a or b	-- directly replace the more popular point.  this way all target colors are among the source colors.
-			end,
-			progress = progress,
+
+		local tileCmpImgHist = table.map(tilesForCmpImgStrs, function(tiles) return #tiles end):setmetatable(nil)
+		local fromto, tileCmpImgHist = buildColorMapMedianCut{
+			hist = tileCmpImgHist,
+			targetSize = targetSize,	-- target number of tiles
+			
+			-- directly replace the more popular point.  this way all target colors are among the source colors.
+			-- if you do average the replacement then get ready to rebuild the 8x8 pic using gauss seidel inverse laplacian ... very tempting since it'll be quick ...
+			mergeMethod = 'replaceHighestWeight',	
 		}
-		for _,tileIndex in ipairs(table.keys(tiles)) do
-			local tile = tiles[tileIndex]
-			local newgradstr = fromto[tile.gradstr]
-			if newgradstr ~= tile.gradstr then
+
+		for _,tile in pairs(tiles) do
+			local newCmpImgStr = fromto[tile.cmpImgStr]
+			if newCmpImgStr ~= tile.cmpImgStr then
 				-- TODO a better solution might be some gauss seidel using the boundary conditions (like my gradient based copy paste trick)
-				local newtiles = tilesForGradStrs[newgradstrs]
-TODO even with the replace() merge() function, this still gets nil entries
+				local newtiles = tilesForCmpImgStrs[newCmpImgStr]
 				tile.img = newtiles[math.random(#newtiles)].img:clone()
 			end
 		end
 	end
-	newimg:save(basefilename..'-16tiles-16colors-dsqa-quanttiles.png')	-- dsqa = "downsample quanization association of tiles"
+	quantizeTiles(768)
+	rebuildTiles(tiles, ts, tw, th):save(basefilename..'-16tiles-16colors-dsqa-quanttiles768.png')	-- dsqa = "downsample quanization association of tiles"
+	quantizeTiles(80)
+	rebuildTiles(tiles, ts, tw, th):save(basefilename..'-16tiles-16colors-dsqa-quanttiles80.png')	-- dsqa = "downsample quanization association of tiles"
 	--]=]
 
 	print'done'

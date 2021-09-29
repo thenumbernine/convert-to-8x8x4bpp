@@ -4,9 +4,18 @@ local class = require 'ext.class'
 local range = require 'ext.range'
 
 
+--[[
+args:
+	mergeMethod = options:
+		weighted
+		replaceRandom
+		replaceHighestWeight
+--]]
 local function buildColorMapMedianCut(args)
 	local hist = assert(args.hist)
 	local targetSize = assert(args.targetSize)
+	
+	local mergeMethod = args.mergeMethod or 'weighted'
 
 	local dim
 	for color,weight in pairs(hist) do
@@ -81,7 +90,6 @@ local function buildColorMapMedianCut(args)
 		elseif #b.pts == 0 then	-- then take some from a and put them in b?
 			b.pts:insert(1, a.pts:remove())
 		end
-		print('#a', #a.pts, '#b', #b.pts)
 		a:calcSize()
 		b:calcSize()
 		return a, b
@@ -112,35 +120,37 @@ local function buildColorMapMedianCut(args)
 	-- ok now we have 'targetSize' nodes, now map each pt in the node onto one pt in the node
 	local fromto = {}
 	for _,node in ipairs(nodes) do
-		-- [[ use weighted average
-		local avg = vector('double', dim)
-		local norm = 0
-		for _,pt in ipairs(node.pts) do
-			local weight = pt.weight
-			for i=0,dim-1 do
-				avg.v[i] = avg.v[i] + pt.pt:byte(i+1,i+1) * weight
+		local tokey
+		-- use weighted average
+		if mergeMethod == 'weighted' then
+			local avg = vector('double', dim)
+			local norm = 0
+			for _,pt in ipairs(node.pts) do
+				local weight = pt.weight
+				for i=0,dim-1 do
+					avg.v[i] = avg.v[i] + pt.pt:byte(i+1,i+1) * weight
+				end
+				norm = norm + weight
 			end
-			norm = norm + weight
+			norm = 1 / norm
+			for i=0,dim-1 do
+				avg.v[i] = math.floor(avg.v[i] * norm)
+			end
+			tokey = range(0,dim-1):mapi(function(i) return string.char(avg.v[i]) end):concat()
+		-- pick a random replacement
+		elseif mergeMethod == 'replaceRandom' then
+			local pts = node.pts:mapi(function(pt) return pt.pt end)
+			tokey = pts[math.random(#pts)]
+		-- pick the largest weighted
+		elseif mergeMethod == 'replaceHighestWeight' then
+			tokey = node.pts:sup(function(a,b) return a.weight > b.weight end).pt
 		end
-		norm = 1 / norm
-		for i=0,dim-1 do
-			avg.v[i] = math.floor(avg.v[i] * norm)
-		end
-		local tokey = range(0,dim-1):mapi(function(i) return string.char(avg.v[i]) end):concat()
-		--]]
-		--[[ pick a random replacement
-		local pts = node.pts:mapi(function(pt) return pt.pt end)
-		local tokey = pts[math.random(#pts)]
-		--]]
-		--[[ pick the largest weighted
-		local tokey = node.pts:sup(function(a,b) return a.weight > b.weight end).pt
-		--]]
 		for _,pt in ipairs(node.pts) do
 			fromto[pt.pt] = tokey
 		end
 	end
 	--]=]
-
+	
 	return fromto, hist
 end
 
