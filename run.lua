@@ -19,7 +19,6 @@ local reduceColorsMedianCut = require 'reducecolorsmediancut'
 local buildColorMapOctree = require 'buildcolormapoctree'
 local buildColorMapMedianCut = require 'buildcolormapmediancut'
 local buildHistogram = require 'buildhistogram'
-local quantizeOctree = require 'quantizeoctree'	-- TODO rename to 'quantizeoctree' or something
 local bintohex = require 'bintohex'
 local binweightedmerge = require 'binweightedmerge'
 
@@ -32,13 +31,13 @@ local basefilename = filename:sub(1,-5)
 Image.hsvToRgb = require 'imghsvtorgb'
 Image.rgbToHsv = require 'imgrgbtohsv'
 
---[[ testing out my reduceColors methods.  rgb seems to work better than hsv.
+-- [[ testing out my reduceColors methods.  rgb seems to work better than hsv.
 --reduceColorsOn2{img=img:rgbToHsv(), targetSize=16}:hsvToRgb():save'test-quant-octree.png'				-- very very slow
 --reduceColorsOctree{img=img:rgbToHsv(), targetSize=16}:hsvToRgb():save'test-quant-octree-hsv.png'		-- very slow
---reduceColorsOctree{img=img, targetSize=16}:save'test-quant-octree.png'								-- very slow
-reduceColorsMedianCut{img=img, targetSize=16, mergeMethod='replaceRandom'}:save'test-quant-mediancut-replaceRandom.png'
-reduceColorsMedianCut{img=img, targetSize=16, mergeMethod='replaceHighestWeight'}:save'test-quant-mediancut-replaceHighestWeight.png'
-reduceColorsMedianCut{img=img, targetSize=16, mergeMethod='weighted'}:save'test-quant-mediancut-weighted.png'
+reduceColorsOctree{img=img, targetSize=16}:save'test-quant-octree.png'								-- very slow
+--reduceColorsMedianCut{img=img, targetSize=16, mergeMethod='replaceRandom'}:save'test-quant-mediancut-replaceRandom.png'
+--reduceColorsMedianCut{img=img, targetSize=16, mergeMethod='replaceHighestWeight'}:save'test-quant-mediancut-replaceHighestWeight.png'
+--reduceColorsMedianCut{img=img, targetSize=16, mergeMethod='weighted'}:save'test-quant-mediancut-weighted.png'
 --reduceColorsMedianCut{img=img:rgbToHsv(), targetSize=16, mergeMethod='replaceRandom'}:hsvToRgb():save'test-quant-mediancut-replaceRandom-hsv.png'
 --reduceColorsMedianCut{img=img:rgbToHsv(), targetSize=16, mergeMethod='replaceHighestWeight'}:hsvToRgb():save'test-quant-mediancut-replaceHighestWeight-hsv.png'
 --reduceColorsMedianCut{img=img:rgbToHsv(), targetSize=16, mergeMethod='weighted'}:hsvToRgb():save'test-quant-mediancut-weighted-hsv.png'
@@ -470,7 +469,7 @@ local function quantizeTiles(args)
 		-- TODO if I am now matching against all flips ... determine which one matched the source image best.
 	end
 
-	-- [[ debug
+	-- [[ debug - show the resulting tiles
 	local quantizedTiles = table.map(fromto, function(v,k) 
 		return true, v
 	end):keys():sort():map(function(newCmpImgStr)
@@ -483,22 +482,43 @@ local function quantizeTiles(args)
 	end
 	graphicsWrapRows(tmpimg, ts, 32):save(basefilename..'-quantized-tiles.png')
 	--]]
+
+	-- [[ debug - show a map of the resulting tiles, and their source tiles
+	local tofroms = {}
+	for from,to in pairs(fromto) do
+		tofroms[to] = tofroms[to] or table()
+		tofroms[to]:insert(from)
+	end
+	local tos = table.keys(tofroms):sort()
+	local tmpimg = Image(
+		ts * (tos:mapi(function(to) return #tofroms[to] end):sup() + 1) + 4,
+		ts * #tos,
+		3, 'unsigned char')
+	for j,to in ipairs(tos) do
+		local froms = tofroms[to]
+		tmpimg:pasteInto{
+			x=0,
+			y=(j-1) * ts,
+			image = tileCompareMethod.reconstruct(to),
+		}
+		for i,from in ipairs(froms) do
+			tmpimg:pasteInto{
+				x=i * ts + 4,
+				y=(j-1) * ts,
+				image = tileCompareMethod.reconstruct(from),
+			}
+		end
+	end
+	tmpimg:save(basefilename..'-quantize-tile-map.png')
+	--]]
 end
 
--- [=[ quantize first ... but this locks in a 1-1 betwen upper nibbles and unique tiles ...
--- [[
+-- quantize first ... but this locks in a 1-1 betwen upper nibbles and unique tiles ...
+--quantizeTiles{targetSize=math.huge}
 quantizeTiles{targetSize=768}
-rebuildTiles(tiles, ts, tw, th):save(basefilename..'-16tiles-16colors-dsqa-quanttiles768before.png')
---]]
---[[
-quantizeTiles{targetSize=256}
-rebuildTiles(tiles, ts, tw, th):save(basefilename..'-16tiles-16colors-dsqa-quanttiles256before.png')
---]]
---[[
-quantizeTiles{targetSize=80}
-rebuildTiles(tiles, ts, tw, th):save(basefilename..'-16tiles-16colors-dsqa-quanttiles80before.png')
---]]
---]=]
+--quantizeTiles{targetSize=256}
+--quantizeTiles{targetSize=80}
+rebuildTiles(tiles, ts, tw, th):save(basefilename..'-16tiles-16colors-dsqa-quant-tiles-before.png')
 
 --[[
 TODO
