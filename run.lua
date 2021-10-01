@@ -234,6 +234,7 @@ local function quantizeTiles(args)
 				end		
 				return ffi.string(cmpimg.buffer, cmpimg.channels * cmpimg.width * cmpimg.height)
 			end,
+			mergeMethod = 'replaceHighestWeight',
 			reconstruct = pickRandomTile,
 		},
 		rgbGradient = {
@@ -253,6 +254,7 @@ local function quantizeTiles(args)
 				end
 				return ffi.string(cmpimg.buffer, cmpimg.channels * cmpimg.width * cmpimg.height)
 			end,
+			mergeMethod = 'replaceHighestWeight',
 			reconstruct = pickRandomTile,
 		},
 		greyscaleCurvature = {
@@ -260,6 +262,7 @@ local function quantizeTiles(args)
 				local cmpimg = img:greyscale():curvature()
 				return ffi.string(cmpimg.buffer, cmpimg.channels * cmpimg.width * cmpimg.height)
 			end,
+			mergeMethod = 'replaceHighestWeight',
 			reconstruct = pickRandomTile,
 		},
 		rgbCurvature = {
@@ -269,6 +272,7 @@ local function quantizeTiles(args)
 				end):unpack())
 				return ffi.string(cmpimg.buffer, cmpimg.channels * cmpimg.width * cmpimg.height)
 			end,
+			mergeMethod = 'replaceHighestWeight',
 			reconstruct = pickRandomTile,
 		},
 		-- [[ TODO hsv curvature
@@ -284,6 +288,7 @@ local function quantizeTiles(args)
 				end
 				return cmpImgStr 
 			end,
+			mergeMethod = 'replaceHighestWeight',
 			reconstruct = pickRandomTile,
 		},
 		original = {
@@ -291,6 +296,8 @@ local function quantizeTiles(args)
 				local cmpimg = img:clone()
 				return ffi.string(cmpimg.buffer, cmpimg.channels * cmpimg.width * cmpimg.height)
 			end,
+			--mergeMethod = 'weighted',	-- doesn't look good
+			mergeMethod = 'replaceHighestWeight',
 			reconstruct = strToRGB,
 		},
 		originalPyramid = {
@@ -300,16 +307,34 @@ local function quantizeTiles(args)
 				local rep = 1
 				while cmpimg.width >= 1 and cmpimg.height >= 1 do
 					local s = ffi.string(cmpimg.buffer, cmpimg.channels * cmpimg.width * cmpimg.height)
-					cmpImgStr = cmpImgStr .. s:rep(rep)	-- repeat to have higher pyramid levels equally weighted as lower
+					cmpImgStr = cmpImgStr .. s
+						-- repeat to have higher pyramid levels equally weighted as lower? 
+						-- that might make a difference when doing octree node collapsing and using a distance function, but with median-cut it makes no difference 
+						-- the distance along unique dimensions will be the same regardless of the # of duplicated dimensions
+						--.. s:rep(rep)	
 					cmpimg = cmpimg:resize(cmpimg.width/2, cmpimg.height/2)
 					rep = rep * 4
 				end
 				return cmpImgStr 
 			end,
+			
+			-- can do, but looks uglier.  has a more definite tile look
+			-- maybe if I averaged graident-space and reconstructed, it'd look better?
+			-- I keep saying that, but if I average gradient-space, then what boundaries can I use to rebuild it? 
+			-- the boundaries will either have to be picked as a distinct tile, or will have to be averaged too,
+			-- and if the grad and boundaries are both averaged, how is it dif than just averaging the rgb?
+			--mergeMethod = 'weighted', 
+			
+			-- looks better
+			-- but if we're using replace as the merge method, why not use a merge technique that matches visual quality better, like curvature or gradient magnitude?
+			mergeMethod = 'replaceHighestWeight',
+			
 			reconstruct = strToRGB,
 		},
 	}
+	--local tileCompareMethod = tileCompareMethods.greyscaleGradient
 	--local tileCompareMethod = tileCompareMethods.greyscaleCurvature
+	--local tileCompareMethod = tileCompareMethods.greyscaleCurvaturePyramids 	-- not so much
 	--local tileCompareMethod = tileCompareMethods.original
 	local tileCompareMethod = tileCompareMethods.originalPyramid
 
@@ -324,9 +349,13 @@ local function quantizeTiles(args)
 				if hflip then img = flipHorizontal(img) end
 				if vflip then img = flipVertical(img) end
 				local cmpImgStr = tileCompareMethod.cmpImgStr(img)
-				-- I guess I don't need an Image, just a buffer ...
+				
+				-- since I'm quantizing using median-cut, the median-cut doesn't use a distance function to group them, so nevermind custom distances that consider all combinations of horz and vert flip
+				-- in fact, in concatenating the string of each flip and then doing median-cut of that string's bytes as a vector space, there's a risk that I'll ignore dimensions that group some tiles better
+				--  for the reason, maybe entering all flips of a tile is better than combining tiles?
 				tilesForCmpImgStrs[cmpImgStr] = tilesForCmpImgStrs[cmpImgStr] or table()
 				tilesForCmpImgStrs[cmpImgStr]:insert(tile)
+			
 				tile.cmpImgStrs:insert{
 					str = cmpImgStr,
 					hflip = hflip,
@@ -343,14 +372,15 @@ local function quantizeTiles(args)
 		
 		-- directly replace the more popular point.  this way all target colors are among the source colors.
 		-- if you do average the replacement then get ready to rebuild the 8x8 pic using gauss seidel inverse laplacian ... very tempting since it'll be quick ...
-		mergeMethod = args.mergeMethod or 'replaceHighestWeight',	
 		-- TODO rebuild the tile 8x8x3 image from the gradient
-		
---[[
-if we do average instead of replace
-then, for post-quantization, I'll need to restrict new merged tiles to only use the palette of the old tiles
---]]
+		mergeMethod = tileCompareMethod.mergeMethod,
 	}
+		
+	--[[
+	if we do average instead of replace
+	then, for tile quantization after color quantization, I'll need to restrict new merged tiles to only use the palette of the old tiles
+	but instead, I think I should be doing tile quantization before color quanitzation
+	--]]
 
 	local bindistsq = require 'bindistsq'
 	for _,tile in pairs(tiles) do
