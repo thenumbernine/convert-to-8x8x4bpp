@@ -7,7 +7,9 @@ local function reduceColorsOn2(args)
 	local targetSize = assert(args.targetSize)
 	local hist = args.hist or buildHistogram(img)
 
-	-- TODO should buildColorMapOn2 replace hist,or should applyColorMap do it?
+	-- should buildColorMapOn2 replace hist,or should applyColorMap do it?
+	-- applyColorMap *can* do it, but buildColorMapOn2 is the only buildColorMap* function that remaps hist in the process
+	-- so might as well use it
 	local fromto, hist = buildColorMapOn2{
 		hist = hist,
 		targetSize = targetSize,

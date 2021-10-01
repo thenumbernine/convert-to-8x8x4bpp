@@ -1,3 +1,5 @@
+local bintohex = require 'bintohex'
+
 --[[
 hist = (optional) histogram, with keys in lua-string binary-blob format
 TODO make fromto the first arg (and this a member of its class?)

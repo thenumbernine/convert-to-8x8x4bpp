@@ -144,6 +144,8 @@ local function buildColorMapMedianCut(args)
 		-- pick the largest weighted
 		elseif mergeMethod == 'replaceHighestWeight' then
 			tokey = node.pts:sup(function(a,b) return a.weight > b.weight end).pt
+		else
+			error("here")
 		end
 		for _,pt in ipairs(node.pts) do
 			fromto[pt.pt] = tokey
@@ -151,7 +153,7 @@ local function buildColorMapMedianCut(args)
 	end
 	--]=]
 	
-	return fromto, hist
+	return fromto
 end
 
 return buildColorMapMedianCut

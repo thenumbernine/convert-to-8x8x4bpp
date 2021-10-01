@@ -4,14 +4,14 @@ local applyColorMap = require 'applycolormap'
 local buildColorMapMedianCut = require 'buildcolormapmediancut'
 
 local function reduceColorsMedianCut(args)
-	local dim = 3
-	local img = assert(args.img)
 	local targetSize = assert(args.targetSize)
+	local img = assert(args.img)
 	local hist = args.hist or buildHistogram(img)
 
-	fromto, hist = buildColorMapMedianCut{
+	local fromto = buildColorMapMedianCut{
 		hist = hist,
-		targetSize = args.targetSize,
+		targetSize = targetSize,
+		mergeMethod = args.mergeMethod,
 	}
 
 	img, hist = applyColorMap(img, fromto, hist)

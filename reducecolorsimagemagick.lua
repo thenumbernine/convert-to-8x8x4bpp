@@ -14,7 +14,6 @@ local function reduceColorsImageMagick(args)
 	os.remove'tmp2.png'
 
 	local newimg = Image'tmp3.png'
-	print('new channels', newimg.channels)	
 	os.remove'tmp3.png'
 	
 	local hist = buildHistogram(newimg)

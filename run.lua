@@ -16,15 +16,36 @@ local reduceColorsOn2 = require 'reducecolorson2'
 local reduceColorsOctree = require 'reducecolorsoctree'
 local reduceColorsImageMagick = require 'reducecolorsimagemagick'
 local reduceColorsMedianCut = require 'reducecolorsmediancut'
+local buildColorMapOctree = require 'buildcolormapoctree'
 local buildColorMapMedianCut = require 'buildcolormapmediancut'
 local buildHistogram = require 'buildhistogram'
 local quantizeOctree = require 'quantizeoctree'	-- TODO rename to 'quantizeoctree' or something
 local bintohex = require 'bintohex'
 local binweightedmerge = require 'binweightedmerge'
 
+-- map-tex-small.png is made from map-tex.png of super-metroid-randomizer, then box average downsample by 1/32 such that 8x8 pixels is 1 region map block
+-- map-tex-small-brighter.png is made from map-tex-small.png, then in Gimp adjust color levels, input=75, output=180 or so, plus or minus
 local filename = ... or 'map-tex-small-brighter.png'
-local img = Image(filename)
+local img = Image(filename):setChannels(3)
 local basefilename = filename:sub(1,-5)
+
+Image.hsvToRgb = require 'imghsvtorgb'
+Image.rgbToHsv = require 'imgrgbtohsv'
+
+--[[ testing out my reduceColors methods.  rgb seems to work better than hsv.
+--reduceColorsOn2{img=img:rgbToHsv(), targetSize=16}:hsvToRgb():save'test-quant-octree.png'				-- very very slow
+--reduceColorsOctree{img=img:rgbToHsv(), targetSize=16}:hsvToRgb():save'test-quant-octree-hsv.png'		-- very slow
+--reduceColorsOctree{img=img, targetSize=16}:save'test-quant-octree.png'								-- very slow
+reduceColorsMedianCut{img=img, targetSize=16, mergeMethod='replaceRandom'}:save'test-quant-mediancut-replaceRandom.png'
+reduceColorsMedianCut{img=img, targetSize=16, mergeMethod='replaceHighestWeight'}:save'test-quant-mediancut-replaceHighestWeight.png'
+reduceColorsMedianCut{img=img, targetSize=16, mergeMethod='weighted'}:save'test-quant-mediancut-weighted.png'
+--reduceColorsMedianCut{img=img:rgbToHsv(), targetSize=16, mergeMethod='replaceRandom'}:hsvToRgb():save'test-quant-mediancut-replaceRandom-hsv.png'
+--reduceColorsMedianCut{img=img:rgbToHsv(), targetSize=16, mergeMethod='replaceHighestWeight'}:hsvToRgb():save'test-quant-mediancut-replaceHighestWeight-hsv.png'
+--reduceColorsMedianCut{img=img:rgbToHsv(), targetSize=16, mergeMethod='weighted'}:hsvToRgb():save'test-quant-mediancut-weighted-hsv.png'
+--reduceColorsImageMagick{img=img, targetSize=16}:save'test-quant-imagemagick.png'	-- fast
+os.exit()
+--]]
+
 
 --[[
 TODO algo:
@@ -331,12 +352,49 @@ local function quantizeTiles(args)
 			
 			reconstruct = strToRGB,
 		},
+		greyscalePyramid = {
+			cmpImgStr = function(img)
+				local cmpimg = img:greyscale():rgb()
+				local cmpImgStr = ''
+				local rep = 1
+				while cmpimg.width >= 1 and cmpimg.height >= 1 do
+					local s = ffi.string(cmpimg.buffer, cmpimg.channels * cmpimg.width * cmpimg.height)
+					cmpImgStr = cmpImgStr .. s
+						-- repeat to have higher pyramid levels equally weighted as lower? 
+						-- that might make a difference when doing octree node collapsing and using a distance function, but with median-cut it makes no difference 
+						-- the distance along unique dimensions will be the same regardless of the # of duplicated dimensions
+						--.. s:rep(rep)	
+					cmpimg = cmpimg:resize(cmpimg.width/2, cmpimg.height/2)
+					rep = rep * 4
+				end
+				return cmpImgStr 
+			end,
+			
+			--mergeMethod = 'weighted', 
+			mergeMethod = 'replaceHighestWeight',
+		
+			-- if we're greyscale then reconstructing doesn't work so well
+			-- this is where our distinct 4bits per tile come in handy
+			reconstruct = pickRandomTile,
+			--reconstruct = strToRGB,
+		},
 	}
+
+	-- [[ use greyscale tiles for determining tile quantization?  
+	-- and then later use color for palette quantization
+	tiles, tw, th = splitImageIntoTiles(img:greyscale():rgb(), ts)
+	--]]
+	--[[ or use gradient magnitude?
+	local imggrey = img:greyscale()
+	tiles, tw, th = splitImageIntoTiles(Image.combine(imggrey:gradient()):l2norm():rgb(), ts)
+	--]]
+
 	--local tileCompareMethod = tileCompareMethods.greyscaleGradient
 	--local tileCompareMethod = tileCompareMethods.greyscaleCurvature
 	--local tileCompareMethod = tileCompareMethods.greyscaleCurvaturePyramids 	-- not so much
 	--local tileCompareMethod = tileCompareMethods.original
 	local tileCompareMethod = tileCompareMethods.originalPyramid
+	--local tileCompareMethod = tileCompareMethods.greyscalePyramid
 
 	for _,tile in pairs(tiles) do
 		-- to make this invariant wrt flipping horizontal and vertical ... flip the image horz, then vert, then both
@@ -366,7 +424,10 @@ local function quantizeTiles(args)
 	end
 
 	local tileCmpImgHist = table.map(tilesForCmpImgStrs, function(tiles) return #tiles end):setmetatable(nil)
-	local fromto, tileCmpImgHist = buildColorMapMedianCut{
+	-- don't use median cut, that will just pick one pixel in one miplevel and sort by its one value
+	local fromto = buildColorMapMedianCut{
+	-- instead do something that merges by distance between points
+	--local fromto = buildColorMapOctree{
 		hist = tileCmpImgHist,
 		targetSize = targetSize,	-- target number of tiles
 		
@@ -408,6 +469,20 @@ local function quantizeTiles(args)
 		end
 		-- TODO if I am now matching against all flips ... determine which one matched the source image best.
 	end
+
+	-- [[ debug
+	local quantizedTiles = table.map(fromto, function(v,k) 
+		return true, v
+	end):keys():sort():map(function(newCmpImgStr)
+		return tileCompareMethod.reconstruct(newCmpImgStr)
+	end)
+	print('#quantized Tiles', #quantizedTiles)
+	local tmpimg = Image(ts, ts * #quantizedTiles, 3, 'unsigned char')
+	for i,img in ipairs(quantizedTiles) do
+		tmpimg:pasteInto{x=0, y=ts*(i-1), image=img}
+	end
+	graphicsWrapRows(tmpimg, ts, 32):save(basefilename..'-quantized-tiles.png')
+	--]]
 end
 
 -- [=[ quantize first ... but this locks in a 1-1 betwen upper nibbles and unique tiles ...
@@ -637,12 +712,10 @@ for i,xy in ipairs(img1pixelIndexToXY) do
 		x = x,
 		y = y,
 		-- use original image
-		--img = img:copy{x=x*ts, y=y*ts, width=ts, height=ts},
+		img = img:copy{x=x*ts, y=y*ts, width=ts, height=ts},
 		-- use current tile - needed for tile-quantization-before
 		-- but these aren't stored for solid-black, so ...
-		img = tiles[tileIndex] 
-			and tiles[tileIndex].img:clone()
-			or Image(ts,ts,3,'unsigned char'):clear(),
+		--img = tiles[tileIndex] and tiles[tileIndex].img:clone() or Image(ts,ts,3,'unsigned char'):clear(),
 	}
 	p = p + 3
 end
@@ -669,7 +742,7 @@ print('high-nibble '..(j-1)..' has '..#ctiles..' tiles')
 
 	if #ctiles > 0 then
 		local wrapped = graphicsWrapRows(qimg, ts, 16)
-		wrapped:save('quant15 color '..(j-1)..' tiles.png')
+		wrapped:save('color quant15 '..(j-1)..' tiles.png')
 	end
 	-- now that the imgs have been quantized as well, paste everything back together
 	for i,tile in ipairs(ctiles) do
