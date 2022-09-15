@@ -2,7 +2,7 @@ local vector = require 'ffi.cpp.vector'
 local table = require 'ext.table'
 local class = require 'ext.class'
 local range = require 'ext.range'
-
+local bindistsq = require 'bindistsq'
 
 --[[
 args:
@@ -58,7 +58,8 @@ local function buildColorMapMedianCut(args)
 		local a = Node()
 		local b = Node()
 		local k = self.biggestDim
-		
+	
+		--[=[ aabb based
 		--[[ pick the midpoint of the largest dimension interval
 		local mid = .5 * (self.max.v[k] + self.min.v[k])
 		--]]
@@ -85,6 +86,70 @@ local function buildColorMapMedianCut(args)
 				b:addPt(pt.pt, pt.weight)
 			end
 		end
+		--]=]
+		-- [=[ oriented plane
+		-- find the longest distance between two points
+		local bestDist, bestci, bestcj
+		for i=1,#self.pts-1 do
+			local ci = self.pts[i].pt
+			for j=i+1,#self.pts do
+				local cj = self.pts[j].pt
+				local dist = bindistsq(ci, cj)
+				-- find the plane that maximizes the distance between any (all?) two points
+				if not bestDist or bestDist < dist then
+					bestDist = dist
+					bestci = ci
+					bestcj = cj
+				end
+			end
+		end
+		local planeNormal = vector('double', dim)	-- normal points to ci from cj
+		local planeConst = 0	-- dist = -p dot n for some point p on the normal ... cj for now, 
+		-- so cj should eval to 0 dist from the plane and ci should be + dist
+		for k=1,dim do
+			local cik = bestci:byte(k,k)
+			local cjk = bestcj:byte(k,k)
+			local nk = cik - cjk 
+			planeNormal.v[k-1] = nk
+			planeConst = planeConst - cjk * nk
+			--for cj: dist = -cjk * nk + cjk * nk = 0
+			--for ci: dist = (cik - cjk) * nk = (cik - cjk)*(cik - cjk) = |ci - cj|^2
+		end
+		local function calcPlaneDist(c)
+			local dist = planeConst
+			for k=1,dim do
+				 dist = dist + planeNormal.v[k-1] * c:byte(k,k)
+			end
+			return dist
+		end
+		-- now pick the midpoint distance along the plane that divides two groups
+		-- use a temp variable
+		for _,pt in ipairs(self.pts) do
+			pt.planeDist = calcPlaneDist(pt.pt)
+		end
+		self.pts:sort(function(a,b) return a.planeDist < b.planeDist end)
+		local total = self.pts:mapi(function(pt) return pt.weight end):sum()	-- hmm, should weight bias the plane normal?
+		local half = .5 * total
+		local sofar = 0
+		local mid
+		for _,pt in ipairs(self.pts) do
+			if sofar > half then 
+				mid = pt.planeDist
+				break
+			end
+			sofar = sofar + pt.weight
+		end
+		if not mid then mid = self.pts:last().planeDist end
+		-- now separate into two children
+		for _,pt in ipairs(self.pts) do
+			if pt.planeDist >= mid then
+				a:addPt(pt.pt, pt.weight)
+			else
+				b:addPt(pt.pt, pt.weight)
+			end
+		end
+		--]=]
+
 		if #a.pts == 0 then	-- then take some from b and put them in a ?
 			a.pts:insert(b.pts:remove(1))
 		elseif #b.pts == 0 then	-- then take some from a and put them in b?

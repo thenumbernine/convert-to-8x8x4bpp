@@ -10,7 +10,7 @@ local function buildColorMapOn2(args)
 
 	-- just needs to be increasing wrt the actual dist, doesn't need to be exact, used for comparison for merging closest points
 	local calcPtDist = assert(args.dist)
-	local mergePts = assert(args.merge)
+	local merge = args.merge or require 'binweightedmerge'
 	local progress = args.progress
 
 	local colors = table.keys(hist):sort(function(a,b)
@@ -85,7 +85,7 @@ local function buildColorMapOn2(args)
 --print(table.keys(hist):mapi(function(c) return ' '..bintohex(c) end):concat'\n')
 		local wk = wi + wj
 		-- weight by most popular colors
-		local ck = mergePts(ci, cj, wi/wk, wj/wk)
+		local ck = merge(ci, cj, wi/wk, wj/wk)
 --print('adding new color key '..('%06x'):format(ck)..' weight '..wk)
 	
 		-- if there was an old entry mappig into ci or cj then now it should map into ck

@@ -1,7 +1,7 @@
 #! /usr/bin/env luajit
 local ffi = require 'ffi'
 local bit = require 'bit'
-local os = require 'ext.os'
+local file = require 'ext.file'
 local class = require 'ext.class'
 local table = require 'ext.table'
 local range = require 'ext.range'
@@ -31,10 +31,11 @@ local basefilename = filename:sub(1,-5)
 Image.hsvToRgb = require 'imghsvtorgb'
 Image.rgbToHsv = require 'imgrgbtohsv'
 
--- [[ testing out my reduceColors methods.  rgb seems to work better than hsv.
+--[[ testing out my reduceColors methods.  rgb seems to work better than hsv.
+img:save'test-quant-original.png'
 --reduceColorsOn2{img=img:rgbToHsv(), targetSize=16}:hsvToRgb():save'test-quant-octree.png'				-- very very slow
 --reduceColorsOctree{img=img:rgbToHsv(), targetSize=16}:hsvToRgb():save'test-quant-octree-hsv.png'		-- very slow
-reduceColorsOctree{img=img, targetSize=16}:save'test-quant-octree.png'								-- very slow
+--reduceColorsOctree{img=img, targetSize=16}:save'test-quant-octree.png'								-- very slow
 --reduceColorsMedianCut{img=img, targetSize=16, mergeMethod='replaceRandom'}:save'test-quant-mediancut-replaceRandom.png'
 --reduceColorsMedianCut{img=img, targetSize=16, mergeMethod='replaceHighestWeight'}:save'test-quant-mediancut-replaceHighestWeight.png'
 --reduceColorsMedianCut{img=img, targetSize=16, mergeMethod='weighted'}:save'test-quant-mediancut-weighted.png'
@@ -316,8 +317,8 @@ local function quantizeTiles(args)
 				local cmpimg = img:clone()
 				return ffi.string(cmpimg.buffer, cmpimg.channels * cmpimg.width * cmpimg.height)
 			end,
-			--mergeMethod = 'weighted',	-- doesn't look good
-			mergeMethod = 'replaceHighestWeight',
+			mergeMethod = 'weighted',
+			--mergeMethod = 'replaceHighestWeight',
 			reconstruct = strToRGB,
 		},
 		originalPyramid = {
@@ -343,11 +344,11 @@ local function quantizeTiles(args)
 			-- I keep saying that, but if I average gradient-space, then what boundaries can I use to rebuild it? 
 			-- the boundaries will either have to be picked as a distinct tile, or will have to be averaged too,
 			-- and if the grad and boundaries are both averaged, how is it dif than just averaging the rgb?
-			--mergeMethod = 'weighted', 
+			mergeMethod = 'weighted', 
 			
 			-- looks better
 			-- but if we're using replace as the merge method, why not use a merge technique that matches visual quality better, like curvature or gradient magnitude?
-			mergeMethod = 'replaceHighestWeight',
+			--mergeMethod = 'replaceHighestWeight',
 			
 			reconstruct = strToRGB,
 		},
@@ -379,6 +380,7 @@ local function quantizeTiles(args)
 		},
 	}
 
+	-- unless I do this here, the color quantizer screws things up and the result image idk something
 	-- [[ use greyscale tiles for determining tile quantization?  
 	-- and then later use color for palette quantization
 	tiles, tw, th = splitImageIntoTiles(img:greyscale():rgb(), ts)
@@ -391,8 +393,8 @@ local function quantizeTiles(args)
 	--local tileCompareMethod = tileCompareMethods.greyscaleGradient
 	--local tileCompareMethod = tileCompareMethods.greyscaleCurvature
 	--local tileCompareMethod = tileCompareMethods.greyscaleCurvaturePyramids 	-- not so much
-	--local tileCompareMethod = tileCompareMethods.original
-	local tileCompareMethod = tileCompareMethods.originalPyramid
+	local tileCompareMethod = tileCompareMethods.original
+	--local tileCompareMethod = tileCompareMethods.originalPyramid
 	--local tileCompareMethod = tileCompareMethods.greyscalePyramid
 
 	for _,tile in pairs(tiles) do
@@ -675,7 +677,7 @@ end
 
 --[[ using my slow methods
 -- linear goes slow for this sized pic, cuz it is O(n^2) ... takes 12 mins for reducing 1200 colors
-if os.fileexists(img1pixpertilefilename) then
+if file(img1pixpertilefilename):exists() then
 	img1pixpertile = Image(img1pixpertilefilename)
 	hist = buildHistogram(img1pixpertile)
 else
