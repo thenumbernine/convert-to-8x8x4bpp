@@ -1,7 +1,7 @@
 #! /usr/bin/env luajit
 local ffi = require 'ffi'
 local bit = require 'bit'
-local file = require 'ext.file'
+local path = require 'ext.path'
 local class = require 'ext.class'
 local table = require 'ext.table'
 local range = require 'ext.range'
@@ -677,7 +677,7 @@ end
 
 --[[ using my slow methods
 -- linear goes slow for this sized pic, cuz it is O(n^2) ... takes 12 mins for reducing 1200 colors
-if file(img1pixpertilefilename):exists() then
+if path(img1pixpertilefilename):exists() then
 	img1pixpertile = Image(img1pixpertilefilename)
 	hist = buildHistogram(img1pixpertile)
 else
