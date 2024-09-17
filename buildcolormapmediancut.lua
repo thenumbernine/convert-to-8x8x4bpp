@@ -1,4 +1,4 @@
-local vector = require 'ffi.cpp.vector'
+local vector = require 'ffi.cpp.vector-lua'
 local table = require 'ext.table'
 local class = require 'ext.class'
 local range = require 'ext.range'
@@ -25,6 +25,7 @@ local function buildColorMapMedianCut(args)
 			assert(dim == #color)
 		end
 	end
+	if not dim then return end
 
 	-- [=[ TODO put this in its own function?  "buildColorMapMedianCut"
 	-- build the from->to color mapping

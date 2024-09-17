@@ -1,6 +1,6 @@
 local ffi = require 'ffi'
 local bit = require 'bit'
-local vector = require 'ffi.cpp.vector'
+local vector = require 'ffi.cpp.vector-lua'
 local class = require 'ext.class'
 local table = require 'ext.table'
 local range = require 'ext.range'

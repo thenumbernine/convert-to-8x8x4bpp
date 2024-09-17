@@ -13,14 +13,9 @@ local vec3d = require 'vec-ffi.vec3d'
 local Image = require 'image'
 
 local reduceColorsOn2 = require 'reducecolorson2'
-local reduceColorsOctree = require 'reducecolorsoctree'
 local reduceColorsImageMagick = require 'reducecolorsimagemagick'
 local reduceColorsMedianCut = require 'reducecolorsmediancut'
-local buildColorMapOctree = require 'buildcolormapoctree'
-local buildColorMapMedianCut = require 'buildcolormapmediancut'
 local buildHistogram = require 'buildhistogram'
-local bintohex = require 'bintohex'
-local binweightedmerge = require 'binweightedmerge'
 
 -- map-tex-small.png is made from map-tex.png of super-metroid-randomizer, then box average downsample by 1/32 such that 8x8 pixels is 1 region map block
 -- map-tex-small-brighter.png is made from map-tex-small.png, then in Gimp adjust color levels, input=75, output=180 or so, plus or minus
@@ -34,6 +29,7 @@ Image.rgbToHsv = require 'imgrgbtohsv'
 --[[ testing out my reduceColors methods.  rgb seems to work better than hsv.
 img:save'test-quant-original.png'
 --reduceColorsOn2{img=img:rgbToHsv(), targetSize=16}:hsvToRgb():save'test-quant-octree.png'				-- very very slow
+local reduceColorsOctree = require 'reducecolorsoctree'
 --reduceColorsOctree{img=img:rgbToHsv(), targetSize=16}:hsvToRgb():save'test-quant-octree-hsv.png'		-- very slow
 --reduceColorsOctree{img=img, targetSize=16}:save'test-quant-octree.png'								-- very slow
 --reduceColorsMedianCut{img=img, targetSize=16, mergeMethod='replaceRandom'}:save'test-quant-mediancut-replaceRandom.png'
@@ -426,8 +422,10 @@ local function quantizeTiles(args)
 
 	local tileCmpImgHist = table.map(tilesForCmpImgStrs, function(tiles) return #tiles end):setmetatable(nil)
 	-- don't use median cut, that will just pick one pixel in one miplevel and sort by its one value
+	local buildColorMapMedianCut = require 'buildcolormapmediancut'
 	local fromto = buildColorMapMedianCut{
 	-- instead do something that merges by distance between points
+	--local buildColorMapOctree = require 'buildcolormapoctree'
 	--local fromto = buildColorMapOctree{
 		hist = tileCmpImgHist,
 		targetSize = targetSize,	-- target number of tiles
@@ -681,6 +679,7 @@ if path(img1pixpertilefilename):exists() then
 	img1pixpertile = Image(img1pixpertilefilename)
 	hist = buildHistogram(img1pixpertile)
 else
+	local binweightedmerge = require 'binweightedmerge'
 	img1pixpertile, hist = reduceColorsOn2{
 		img = img1pixpertile,
 		targetSize = 16,	-- 16 unique palettes
@@ -699,6 +698,7 @@ end
 --[[ octree seems to group all the tiles up to the first entry ... hmm, why is this ...
 -- TODO instead of merging octree leafs (which gives ugly performance), do a legit nearest search, start with the deepest and closest nodes, prune nodes too far away, and also re-insert the weighted merged point instead of just replacing points 
 -- then this would have better performance but same results as the linear search
+local reduceColorsOctree = require 'reducecolorsoctree'
 img1pixpertile, hist = reduceColorsOctree{img=img1pixpertile, targetSize=16}	-- 16 unique palettes
 --]]
 --[[ using imagemagick
@@ -758,6 +758,7 @@ print('high-nibble '..(j-1)..' has '..#ctiles..' tiles')
 	
 	-- now quantize each img-per-regionmap palette into 15 colors
 	--local qimg = reduceColorsOn2{img=timg, targetSize=15, progress=progress}	-- if 1200 -> 16 points above took 12 mins, this is 3000 points .. soo  .... much longer 
+	--local reduceColorsOctree = require 'reducecolorsoctree'
 	--local qimg, hist = reduceColorsOctree{img=timg, targetSize=15}	-- ugly, as octree search is ugly atm. TODO fixme, do a real search (not approximate) and real merge (re-insert, don't just remove/replace points), use octree for pruning
 	--local qimg, hist = reduceColorsImageMagick{img=timg, targetSize=15}
 	local qimg, hist = reduceColorsMedianCut{img=timg, targetSize=15}

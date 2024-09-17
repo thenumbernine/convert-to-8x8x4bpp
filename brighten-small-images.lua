@@ -1,5 +1,6 @@
 #!/usr/bin/env luajit
 local math = require 'ext.math'
+local path = require 'ext.path'
 local Image = require 'image'
 
 --[[
@@ -50,5 +51,9 @@ for _,info in ipairs{
 	{'map-tex-region-7-small.png', 'map-tex-region-7-small-brighter.png'},
 } do
 	local srcfn, dstfn = table.unpack(info)
-	brighten(Image(srcfn)):save(dstfn)
+	if path(srcfn):exists() then
+		brighten(Image(srcfn)):save(dstfn)
+	else
+		print(srcfn.." missing, couldn't create "..dstfn)
+	end
 end
