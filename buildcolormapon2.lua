@@ -1,4 +1,5 @@
 local table = require 'ext.table'
+local string = require 'ext.string'
 
 --[[
 build map from src to dest color to reduce number of colors
@@ -24,7 +25,7 @@ local function buildColorMapOn2(args)
 	end
 
 --print('colors: #'..#colors)
---print(colors:mapi(function(c) return ' '..bintohex(c) end):concat'\n')
+--print(colors:mapi(function(c) return ' '..string.hex(c) end):concat'\n')
 	local distSqs = colors:mapi(function(ci,i)
 		return colors:mapi(function(cj,j)
 			return i == j and 0 or calcPtDist(ci, cj)
@@ -69,20 +70,20 @@ local function buildColorMapOn2(args)
 		if not cj then
 			error("pairsForDists had "..j.." but there is no color")
 		end
---print('combining '..bintohex(ci)..' and '..bintohex(cj))
+--print('combining '..string.hex(ci)..' and '..string.hex(cj))
 		local wi = hist[ci]
 		if not wi then
-			error("couldn't find weight for color key "..bintohex(ci))
+			error("couldn't find weight for color key "..string.hex(ci))
 		end
 		local wj = assert(hist[cj])
 		if not wj then
-			error("couldn't find weight for color key "..bintohex(cj))
+			error("couldn't find weight for color key "..string.hex(cj))
 		end
 		hist[ci] = nil
 		hist[cj] = nil
 
 --print('and clearing their hist weights, hist keys are now: #'..#table.keys(hist))
---print(table.keys(hist):mapi(function(c) return ' '..bintohex(c) end):concat'\n')
+--print(table.keys(hist):mapi(function(c) return ' '..string.hex(c) end):concat'\n')
 		local wk = wi + wj
 		-- weight by most popular colors
 		local ck = merge(ci, cj, wi/wk, wj/wk)
@@ -153,7 +154,7 @@ local function buildColorMapOn2(args)
 		else
 			-- add new entries for distSqs[*][k] and pairsForDists
 			local k = #colors
---print('made new color '..bintohex(ck)..' .. # colors '..#colors)
+--print('made new color '..string.hex(ck)..' .. # colors '..#colors)
 			distSqs[k] = table()
 			for i=1,#colors-1 do
 				local ci = colors[i]

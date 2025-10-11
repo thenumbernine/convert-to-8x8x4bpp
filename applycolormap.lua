@@ -1,4 +1,4 @@
-local bintohex = require 'bintohex'
+local string = require 'ext.string'
 
 --[[
 hist = (optional) histogram, with keys in lua-string binary-blob format
@@ -12,7 +12,7 @@ local function applyColorMap(img, fromto, hist)
 			local key = string.char(p[0], p[1], p[2])
 			local dstkey = fromto[key]
 			if not dstkey then
-				error("no fromto for color "..bintohex(key))
+				error("no fromto for color "..string.hex(key))
 			end
 			p[0], p[1], p[2] = dstkey:byte(1,3)
 			p = p + 3

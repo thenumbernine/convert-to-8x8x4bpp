@@ -3,9 +3,9 @@ local bit = require 'bit'
 local vector = require 'ffi.cpp.vector-lua'
 local class = require 'ext.class'
 local table = require 'ext.table'
+local string = require 'ext.string'
 local range = require 'ext.range'
 local bindistlinf = require 'bindistlinf'
-local bintohex = require 'bintohex'
 
 local function buildColorMapOctree(args)
 	local hist = assert(args.hist)
@@ -211,7 +211,7 @@ print(indent..'findClosest'
 	..' max=('..range(dim):mapi(function(i) return self.max.v[i-1] end):concat', '..')'
 	..' #chs='..(self.chs and #self.chs or 'nil')
 	..' #pts='..(self.pts and #self.pts or 'nil')
-	..' closestPt='..(closestNode and bintohex(closestNode.pts[1].pt) or 'nil')
+	..' closestPt='..(closestNode and string.hex(closestNode.pts[1].pt) or 'nil')
 	..' bestDist='..tostring(bestDist)
 )
 indent = indent .. ' '		
@@ -281,7 +281,7 @@ print(indent..'findDown'
 	..' max=('..range(dim):mapi(function(i) return self.max.v[i-1] end):concat', '..')'
 	..' #chs='..(self.chs and #self.chs or 'nil')
 	..' #pts='..(self.pts and #self.pts or 'nil')
-	..' closestPt='..bintohex(closestNode.pts[1].pt)
+	..' closestPt='..string.hex(closestNode.pts[1].pt)
 	..' bestDist='..bestDist
 )
 indent = indent .. ' '		
@@ -296,7 +296,7 @@ indent = indent .. ' '
 					bestDist = dist
 					closestNode = self
 					if bestDist == 0 then return closestNode, bestDist end
---print(indent..'closest is '..bintohex(pt.pt)..' dist '..bestDist)
+--print(indent..'closest is '..string.hex(pt.pt)..' dist '..bestDist)
 				end
 			end
 		end
@@ -398,7 +398,7 @@ indent = indent .. ' '
 	for node in root:iter() do
 		if node.pts then
 			for _,pt in ipairs(node.pts) do
---print("mapping color "..bintohex(pt.pt).." to node "..tostring(node))
+--print("mapping color "..string.hex(pt.pt).." to node "..tostring(node))
 				nodeForColor[pt.pt] = node
 			end
 		end
@@ -420,7 +420,7 @@ indent = indent .. ' '
 	for _,color in ipairs(colors) do
 		--assert(type(color) == 'string')
 		--assert(#color == dim)
---print('searching for '..bintohex(color))		
+--print('searching for '..string.hex(color))		
 		local node = nodeForColor[color]
 		local closest, dist = node:findClosest(color)
 		local closestColor = closest.pts[1].pt
@@ -428,7 +428,7 @@ indent = indent .. ' '
 		--assert(type(closestColor) == 'string')
 		--assert(#closestColor == dim)
 		pairsForDists:insert{color, closestColor, dist}
---print(bintohex(color)..' '..bintohex(closestColor)..' '..dist)
+--print(string.hex(color)..' '..string.hex(closestColor)..' '..dist)
 	end
 	pairsForDists:sort(function(a,b) return a[3] > b[3] end)
 
@@ -439,7 +439,7 @@ print(root:countleaves())
 		--assert(type(cj) == 'string')
 		local ni = nodeForColor[ci]
 		local nj = nodeForColor[cj]
---print("merging colors "..bintohex(ci).." and "..bintohex(cj)..' with nodes '..tostring(ni)..' and '..tostring(nj))
+--print("merging colors "..string.hex(ci).." and "..string.hex(cj)..' with nodes '..tostring(ni)..' and '..tostring(nj))
 		--assert(ni)
 		--assert(ni.pts)
 		if #ni.pts ~= 1 then
@@ -455,7 +455,7 @@ print(root:countleaves())
 		local wk = wi + wj
 		ni:removeLeaf()
 		nj:removeLeaf()
---print("clearing nodes associated w/ colors "..bintohex(ci).." and "..bintohex(cj))
+--print("clearing nodes associated w/ colors "..string.hex(ci).." and "..string.hex(cj))
 		nodeForColor[ni] = nil
 		nodeForColor[nj] = nil
 		local ck = merge(ci, cj, wi/wk, wj/wk)
@@ -464,12 +464,12 @@ print(root:countleaves())
 		-- or do I want to just insert it willy nilly?
 		-- or just redo the whole thing?
 		local nk = root:addPtToLeaf(ck, wk)
---print("assigning new merged color "..bintohex(ck)..' to node '..tostring(nk))
+--print("assigning new merged color "..string.hex(ck)..' to node '..tostring(nk))
 		nodeForColor[ck] = nk
 		local sibling = nk:getSibling()
 		--assert(sibling.pts)
 		--assert(#sibling.pts == 1)
---print("re-assigning old color "..bintohex(sibling.pts[1].pt)..' to node '..tostring(sibling))
+--print("re-assigning old color "..string.hex(sibling.pts[1].pt)..' to node '..tostring(sibling))
 		nodeForColor[sibling.pts[1].pt] = sibling
 		
 		-- if there was an old entry mappig into ci or cj then now it should map into ck
